@@ -9,6 +9,7 @@ way, invert the `vy` sign or flip specific motor signs in the mapping below.
 """
 
 import time
+import sys
 from sparkybotmini import SparkyBotMini
 
 

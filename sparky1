@@ -38,7 +38,7 @@ def main():
         print("✓ Auto-reporting enabled\n")
         
         # ===== DRIVE FORWARD =====
-        print("? Driving forward at 50% speed for 2 seconds...")
+        print("? Driving forward at 50% speed for 5 seconds...")
         print("  M1 (Left Front):  50")
         print("  M2 (Left Back):   50")
         print("  M3 (Right Front): 50")
@@ -46,7 +46,7 @@ def main():
         
         # For omniwheel X-pattern: all motors same speed = forward
         robot.set_motor(m1=50, m2=50, m3=50, m4=50)
-        time.sleep(2.0)
+        time.sleep(5.0)
         
         # ===== STOP =====
         print("? Stopping motors...")

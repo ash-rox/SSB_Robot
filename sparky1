@@ -1,3 +1,5 @@
+#wait for robot to connect, then move forward for 5 seconds at 50% speed
+
 #!/usr/bin/env python3
 # coding: utf-8
 """

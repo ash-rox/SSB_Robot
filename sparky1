@@ -9,7 +9,7 @@ Uses SparkyBotMini to drive the 4-wheel robot forward
 
 import time
 import sys
-from sparkybot import SparkyBotMini
+from sparkybotmini import SparkyBotMini
 
 def main():
     """Main entry point: connect, drive forward, stop, disconnect"""

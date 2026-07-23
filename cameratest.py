@@ -159,8 +159,8 @@ class CameraViewer:
                     print("✗ Error reading frame from camera!")
                     break
                 
-                # Flip the frame 180 degrees (fast in-place operation)
-                frame = cv2.rotate(frame, cv2.ROTATE_180)
+                # Flip the frame vertically and horizontally to correct upside-down camera
+                frame = cv2.flip(frame, -1)
                 
                 # Calculate FPS
                 self.calculate_fps()

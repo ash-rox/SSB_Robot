@@ -64,8 +64,8 @@ class CameraViewer:
         self.frame_time = 1.0 / target_fps
         self.display_scale = display_scale
         
-        # Initialize robot
-        self.robot = SparkyBotMini(port=robot_port, baudrate=robot_baudrate, debug=False)
+        # Initialize robot with debug enabled
+        self.robot = SparkyBotMini(port=robot_port, baudrate=robot_baudrate, debug=True)
         self.robot_connected = False
         
         # FPS tracking (optimized)
@@ -86,9 +86,17 @@ class CameraViewer:
             bool: True if connection successful, False otherwise
         """
         print("Connecting to SparkyBotMini robot...")
+        print(f"  Port: {self.robot.port}")
+        print(f"  Baudrate: {self.robot.baudrate}")
+        
         if not self.robot.connect():
             print("✗ Failed to connect to robot!")
-            print("  Continuing with camera feed only...")
+            print("  Troubleshooting:")
+            print("  1. Check if USB cable is connected")
+            print("  2. Verify port with: ls -la /dev/ttyUSB*")
+            print("  3. Check permissions: sudo usermod -a -G dialout $USER")
+            print("  4. Try different ports: /dev/ttyUSB0, /dev/ttyUSB1, /dev/ttyACM0")
+            print("  Continuing with camera feed only...\n")
             return False
         
         print("✓ Connected to robot successfully!")
@@ -96,7 +104,13 @@ class CameraViewer:
         # Enable auto-reporting for sensor feedback
         self.robot.set_auto_report(True)
         time.sleep(0.5)
-        print("✓ Auto-reporting enabled\n")
+        print("✓ Auto-reporting enabled")
+        
+        # Test motor command to verify connection
+        print("✓ Testing motor command...")
+        self.robot.set_motor(0, 0, 0, 0)
+        time.sleep(0.1)
+        print("✓ Motor command sent successfully\n")
         
         self.robot_connected = True
         return True
@@ -197,48 +211,64 @@ class CameraViewer:
             self.last_movement = "Forward"
             if self.robot_connected:
                 move_robot(self.robot, vx=0, vy=SPEED)
+            else:
+                print("✗ Robot not connected - cannot move")
             return True
         
         elif key_char == 's':  # Backward
             self.last_movement = "Backward"
             if self.robot_connected:
                 move_robot(self.robot, vx=0, vy=-SPEED)
+            else:
+                print("✗ Robot not connected - cannot move")
             return True
         
         elif key_char == 'a':  # Strafe Left
             self.last_movement = "Strafe Left"
             if self.robot_connected:
                 move_robot(self.robot, vx=-SPEED, vy=0)
+            else:
+                print("✗ Robot not connected - cannot move")
             return True
         
         elif key_char == 'd':  # Strafe Right
             self.last_movement = "Strafe Right"
             if self.robot_connected:
                 move_robot(self.robot, vx=SPEED, vy=0)
+            else:
+                print("✗ Robot not connected - cannot move")
             return True
         
         elif key_char == 'q':  # Diagonal Up-Left
             self.last_movement = "Diagonal UL"
             if self.robot_connected:
                 move_robot(self.robot, vx=-SPEED, vy=SPEED)
+            else:
+                print("✗ Robot not connected - cannot move")
             return True
         
         elif key_char == 'e':  # Diagonal Up-Right
             self.last_movement = "Diagonal UR"
             if self.robot_connected:
                 move_robot(self.robot, vx=SPEED, vy=SPEED)
+            else:
+                print("✗ Robot not connected - cannot move")
             return True
         
         elif key_char == 'z':  # Diagonal Down-Left
             self.last_movement = "Diagonal DL"
             if self.robot_connected:
                 move_robot(self.robot, vx=-SPEED, vy=-SPEED)
+            else:
+                print("✗ Robot not connected - cannot move")
             return True
         
         elif key_char == 'c':  # Diagonal Down-Right
             self.last_movement = "Diagonal DR"
             if self.robot_connected:
                 move_robot(self.robot, vx=SPEED, vy=-SPEED)
+            else:
+                print("✗ Robot not connected - cannot move")
             return True
         
         elif key_char == ' ':  # Spacebar Stop

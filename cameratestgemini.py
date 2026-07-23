@@ -63,37 +63,40 @@ def main():
             cv2.imshow("SparkyBot Mini Front View", frame)
 
             # cv2.waitKey(30) waits 30ms for a keypress and returns its ASCII value
-            key = cv2.waitKey(30) & 0xFF
+            key_code = cv2.waitKey(30) & 0xFF
+            
+            # Convert raw code safely to a string character (handle empty codes safely)
+            key = chr(key_code).lower() if key_code < 256 else ""
 
             # --- STRAIGHT MOVEMENT CONTROLS ---
-            if key == ord('w'):       # Forward
+            if key == 'w':       # Forward
                 move_robot(bot, vx=0, vy=SPEED)
-            elif key == ord('s'):     # Backward
+            elif key == 's':     # Backward
                 move_robot(bot, vx=0, vy=-SPEED)
-            elif key == ord('a'):     # Strafe Left
+            elif key == 'a':     # Strafe Left
                 move_robot(bot, vx=-SPEED, vy=0)
-            elif key == ord('d'):     # Strafe Right
+            elif key == 'd':     # Strafe Right
                 move_robot(bot, vx=SPEED, vy=0)
             
             # --- DIAGONAL MOVEMENT CONTROLS ---
-            elif key == ord('u'):     # Diagonal Up-Left
+            elif key == 'u':     # Diagonal Up-Left
                 move_robot(bot, vx=-SPEED, vy=SPEED)
-            elif key == ord('y'):     # Diagonal Up-Right
+            elif key == 'y':     # Diagonal Up-Right
                 move_robot(bot, vx=SPEED, vy=SPEED)
-            elif key == ord('j'):     # Diagonal Back-Left
+            elif key == 'j':     # Diagonal Back-Left
                 move_robot(bot, vx=-SPEED, vy=-SPEED)
-            elif key == ord('h'):     # Diagonal Back-Right
+            elif key == 'h':     # Diagonal Back-Right
                 move_robot(bot, vx=SPEED, vy=-SPEED)
             
             # --- CAMERA ACTIONS ---
-            elif key == 32:           # Spacebar code for screenshot
+            elif key_code == 32: # Spacebar code for screenshot
                 timestamp = time.strftime("%Y%m%d-%H%M%S")
                 filename = f"sparky_snap_{timestamp}.jpg"
                 cv2.imwrite(filename, frame)
                 print(f" Saved screenshot: {filename}")
             
             # --- QUIT APPLICATION ---
-            elif key == 27:           # ESC key to safely exit
+            elif key_code == 27: # ESC key to safely exit
                 print("\nShutting down controller application.")
                 break
                 

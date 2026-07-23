@@ -47,6 +47,12 @@ def main():
     print("  [ESC KEY]  : Quit Program")
     print("=============================================\n")
 
+    # Track which keys are currently held down
+    keys_held = {
+        'w': False, 's': False, 'a': False, 'd': False,
+        'q': False, 'e': False, 'z': False, 'c': False
+    }
+
     try:
         while True:
             # Capture frame-by-frame from USB feed
@@ -66,22 +72,22 @@ def main():
             key = cv2.waitKey(30) & 0xFF
 
             # --- MOVEMENT CONTROLS ---
-            if key == ord('w'):       # Forward
-                move_robot(bot, vx=0, vy=SPEED)
-            elif key == ord('s'):     # Backward
-                move_robot(bot, vx=0, vy=-SPEED)
-            elif key == ord('a'):     # Strafe Left
-                move_robot(bot, vx=-SPEED, vy=0)
-            elif key == ord('d'):     # Strafe Right
-                move_robot(bot, vx=SPEED, vy=0)
-            elif key == ord('q'):     # Diagonal Up-Left
-                move_robot(bot, vx=-SPEED, vy=SPEED)
-            elif key == ord('e'):     # Diagonal Up-Right
-                move_robot(bot, vx=SPEED, vy=SPEED)
-            elif key == ord('z'):     # Diagonal Down-Left
-                move_robot(bot, vx=-SPEED, vy=-SPEED)
-            elif key == ord('c'):     # Diagonal Down-Right
-                move_robot(bot, vx=SPEED, vy=-SPEED)
+            if key == ord('w'):
+                keys_held['w'] = True
+            elif key == ord('s'):
+                keys_held['s'] = True
+            elif key == ord('a'):
+                keys_held['a'] = True
+            elif key == ord('d'):
+                keys_held['d'] = True
+            elif key == ord('q'):
+                keys_held['q'] = True
+            elif key == ord('e'):
+                keys_held['e'] = True
+            elif key == ord('z'):
+                keys_held['z'] = True
+            elif key == ord('c'):
+                keys_held['c'] = True
             
             # --- CAMERA ACTIONS ---
             elif key == 32:           # Spacebar code for screenshot
@@ -94,10 +100,39 @@ def main():
             elif key == 27:           # ESC key to safely exit
                 print("\nShutting down controller application.")
                 break
-                
-            else:
-                # Automatically brake the motors if no active direction key is held down
-                move_robot(bot, vx=0, vy=0)
+
+            # Calculate cumulative movement from all held keys
+            vx = 0
+            vy = 0
+
+            # Forward/Backward
+            if keys_held['w']:
+                vy += SPEED
+            if keys_held['s']:
+                vy -= SPEED
+
+            # Left/Right
+            if keys_held['a']:
+                vx -= SPEED
+            if keys_held['d']:
+                vx += SPEED
+
+            # Diagonals (override forward/back if pressed)
+            if keys_held['q']:
+                vx, vy = -SPEED, SPEED
+            elif keys_held['e']:
+                vx, vy = SPEED, SPEED
+            elif keys_held['z']:
+                vx, vy = -SPEED, -SPEED
+            elif keys_held['c']:
+                vx, vy = SPEED, -SPEED
+
+            # Apply the movement
+            move_robot(bot, vx=vx, vy=vy)
+
+            # Release keys on key release (when no key is pressed for 30ms)
+            if key == 255:  # No key pressed in this frame
+                keys_held = {k: False for k in keys_held}
 
     except KeyboardInterrupt:
         print("\nEmergency stop triggered via terminal.")

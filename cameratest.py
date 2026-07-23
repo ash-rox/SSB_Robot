@@ -16,7 +16,7 @@ class CameraViewer:
     Provides simple controls and FPS display.
     """
     
-    def __init__(self, camera_index=0, robot_port="/dev/ttyUSB0", robot_baudrate=115200, target_fps=60):
+    def __init__(self, camera_index=0, robot_port="/dev/ttyUSB0", robot_baudrate=115200, target_fps=60, display_scale=0.5):
         """
         Initialize camera viewer and robot connection.
         
@@ -25,11 +25,13 @@ class CameraViewer:
             robot_port: Serial port for SparkyBotMini (default: /dev/ttyUSB0)
             robot_baudrate: Baud rate for serial communication (default: 115200)
             target_fps: Target frames per second (default: 60)
+            display_scale: Scale factor for display (default: 0.5 for 50% size)
         """
         self.camera_index = camera_index
         self.camera = None
         self.target_fps = target_fps
         self.frame_time = 1.0 / target_fps
+        self.display_scale = display_scale
         
         # Initialize robot
         self.robot = SparkyBotMini(port=robot_port, baudrate=robot_baudrate, debug=False)
@@ -79,9 +81,9 @@ class CameraViewer:
             print("✗ Failed to open camera!")
             return False
         
-        # Optimized camera properties for better performance
-        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        # Optimized camera properties for better performance - reduced resolution
+        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
         self.camera.set(cv2.CAP_PROP_FPS, self.target_fps)
         self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize buffer for low latency
         
@@ -90,8 +92,9 @@ class CameraViewer:
         self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # Enable auto exposure
         
         print("✓ Camera initialized successfully!")
-        print(f"  Resolution: {int(self.camera.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
+        print(f"  Capture Resolution: {int(self.camera.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
               f"{int(self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT))}")
+        print(f"  Display Scale: {self.display_scale * 100:.0f}%")
         print(f"  Target FPS: {int(self.camera.get(cv2.CAP_PROP_FPS))}\n")
         
         return True
@@ -168,6 +171,12 @@ class CameraViewer:
                 # Add information overlay (minimal)
                 self.display_info(frame)
                 
+                # Scale frame for display if needed
+                if self.display_scale != 1.0:
+                    display_width = int(frame.shape[1] * self.display_scale)
+                    display_height = int(frame.shape[0] * self.display_scale)
+                    frame = cv2.resize(frame, (display_width, display_height), interpolation=cv2.INTER_LINEAR)
+                
                 # Display frame
                 cv2.imshow("SparkybotMini Camera Feed", frame)
                 
@@ -228,12 +237,13 @@ def main():
     print("SparkybotMini USB Camera Live Feed Viewer")
     print("=" * 60 + "\n")
     
-    # Create viewer instance with higher target FPS
+    # Create viewer instance with optimized settings
     viewer = CameraViewer(
         camera_index=0,
         robot_port="/dev/ttyUSB0",
         robot_baudrate=115200,
-        target_fps=60  # Increased from default 30
+        target_fps=60,
+        display_scale=0.5  # Display at 50% size for smoother performance
     )
     
     # Connect to robot (optional - continues if fails)

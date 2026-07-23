@@ -1,187 +1,155 @@
 #!/usr/bin/env python3
-"""
-Green Object Detection - USB Camera
-=====================================
-
-Watches the USB camera feed and prints "green detected" whenever a
-green-ish object appears in front of the robot, with a 0.5 second
-cooldown between messages (so a continuously-visible green object
-doesn't spam the console).
-
-Runs indefinitely until you press the SPACEBAR (works over SSH,
-headless - no mouse/window focus required).
-
-Detection approach:
-  1. Grab a frame from the camera.
-  2. Convert it to HSV color space (much easier to isolate a color
-     than in RGB, since hue is separated from brightness/lighting).
-  3. Threshold the frame to a mask of "is this pixel green enough".
-     A wide hue/saturation/value range is used on purpose to give
-     some tolerance for imperfect, uneven, or dull greens rather than
-     needing a pure, saturated green.
-  4. Clean up the mask (remove small noise specks).
-  5. If the green area is bigger than MIN_AREA, count it as a
-     detection.
-
-Install dependencies:
-    pip install opencv-python numpy --break-system-packages
-
-Run with:  python3 green_detector.py
-Stop with: SPACEBAR (or Ctrl+C as a backup)
-"""
-
-import time
+import cv2
+import numpy as np
 import sys
-import termios
-import tty
-import select
+import time
+from sparky_bot import SparkyBotMini
 
-try:
-    import cv2
-    import numpy as np
-except ImportError:
-    print("Missing dependency. Install with:")
-    print("  pip install opencv-python numpy --break-system-packages")
-    sys.exit(1)
+# --- CONFIGURATION ---
+SPEED = 60                 # Base driving speed magnitude (0 to 100)
+MIN_AREA = 800             # Minimum pixel area to count as a detection
+COOLDOWN_SECONDS = 0.5     # Cooldown to prevent console spamming
 
-# ------------------------------------------------------------------
-# CONFIGURATION
-# ------------------------------------------------------------------
-
-CAMERA_INDEX = 0          # 0 is usually the first/only USB camera
-FRAME_WIDTH = 320          # lower resolution = faster processing
-FRAME_HEIGHT = 240
-
-# HSV green range, widened to give "wiggle room" for imperfect,
-# dull, shadowed, or slightly-off greens rather than needing a pure,
-# fully-saturated green. OpenCV HSV ranges: H 0-179, S 0-255, V 0-255
-#
-#   - Hue range widened (35-85) to include yellow-green through teal
-#   - Saturation floor lowered (40) to catch washed-out/dull greens
-#   - Value floor lowered (40) to catch greens in dimmer lighting
-#
-# If you still get misses or false positives, tune these further -
-# lower the floors more for extra tolerance, or raise them back up if
-# it starts falsely triggering on background clutter.
+# Wide HSV range for general, dull, shadow-casting, or imperfect greens
 GREEN_LOWER = np.array([35, 40, 40])
 GREEN_UPPER = np.array([85, 255, 255])
 
-MIN_AREA = 800             # minimum pixel area to count as "detected"
-                           # (raise this if small green specs of noise
-                           # falsely trigger detection; lower it to
-                           # detect smaller/farther-away objects)
 
-COOLDOWN_SECONDS = 0.5
+def move_robot(robot, vx: float, vy: float):
+    """Calculates and sets the X-formation omni wheel motor speeds."""
+    m1 = vy + vx  # Front Left Motor
+    m2 = vy - vx  # Front Right Motor
+    m3 = vy - vx  # Rear Left Motor
+    m4 = vy + vx  # Rear Right Motor
 
-SHOW_PREVIEW = False       # set True to display a debug window
-                           # (only works if you have a display attached,
-                           # not over a headless SSH session)
+    # Proportional scaling to safety boundaries [-100, 100]
+    max_val = max(abs(m1), abs(m2), abs(m3), abs(m4))
+    if max_val > 100.0:
+        scale = 100.0 / max_val
+        m1 *= scale; m2 *= scale; m3 *= scale; m4 *= scale
 
-
-# ------------------------------------------------------------------
-# NON-BLOCKING KEYBOARD CHECK (for spacebar-to-quit over SSH/headless)
-# ------------------------------------------------------------------
-
-def key_waiting():
-    """Returns True if a key is waiting to be read from stdin."""
-    ready, _, _ = select.select([sys.stdin], [], [], 0)
-    return bool(ready)
-
-
-def read_key():
-    """Reads a single waiting key (non-blocking; call key_waiting() first)."""
-    return sys.stdin.read(1)
-
-
-# ------------------------------------------------------------------
-# DETECTION
-# ------------------------------------------------------------------
-
-def detect_green(frame):
-    """Returns True if a green object above MIN_AREA is present."""
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, GREEN_LOWER, GREEN_UPPER)
-
-    # Clean up noise: erode then dilate to remove small false positives
-    mask = cv2.erode(mask, None, iterations=2)
-    mask = cv2.dilate(mask, None, iterations=2)
-
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    if not contours:
-        return False, mask, None
-
-    largest = max(contours, key=cv2.contourArea)
-    area = cv2.contourArea(largest)
-
-    if area >= MIN_AREA:
-        return True, mask, largest
-
-    return False, mask, None
+    robot.set_motor(int(m1), int(m2), int(m3), int(m4))
 
 
 def main():
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-
-    if not cap.isOpened():
-        print(f"Could not open camera at index {CAMERA_INDEX}.")
-        print("Try a different CAMERA_INDEX (1, 2, ...) or check 'ls /dev/video*'.")
+    # Initialize SparkyBot Mini hardware connection
+    bot = SparkyBotMini(port="/dev/ttyUSB0", debug=False)
+    if not bot.connect():
+        print("Error: Could not connect to SparkyBotMini hardware.")
         sys.exit(1)
 
-    print("Green object detection running. Press SPACEBAR to stop (Ctrl+C also works).")
+    # Initialize USB Camera feed (index 0)
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)  # Lower resolution for Pi performance
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+
+    if not cap.isOpened():
+        print("Error: Could not open USB camera.")
+        bot.disconnect()
+        sys.exit(1)
+
+    print("\n=== SparkyBot Mini Live Vision Controller ===")
+    print("  DRIVE CONTROLS (Keep video window focused):")
+    print("  U (Diag UL)   W (Forward)   Y (Diag UR)")
+    print("  A (Strafe L)  S (Backward)  D (Strafe R)")
+    print("  J (Diag DL)                 H (Diag DR)")
+    print("  ")
+    print("  [SPACEBAR] : Take Screenshot")
+    print("  [ESC KEY]  : Quit Program")
+    print("=============================================\n")
 
     last_detection_time = 0.0
-
-    # Put the terminal into raw mode so we can catch a spacebar press
-    # without the user needing to hit Enter afterward. Restored in
-    # `finally` no matter how the loop exits.
-    stdin_fd = sys.stdin.fileno()
-    old_terminal_settings = termios.tcgetattr(stdin_fd)
-    tty.setraw(stdin_fd)
 
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
-                print("Failed to read frame from camera.")
-                time.sleep(0.1)
-                continue
+                print("Failed to grab camera frame.")
+                break
 
-            found, mask, contour = detect_green(frame)
+            # --- GREEN DETECTION ENGINE ---
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(hsv, GREEN_LOWER, GREEN_UPPER)
+
+            # Clean up fine noise specks
+            mask = cv2.erode(mask, None, iterations=2)
+            mask = cv2.dilate(mask, None, iterations=2)
+
+            # Find contours inside the thresholded binary mask
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            green_found = False
+            largest_contour = None
+
+            if contours:
+                largest_contour = max(contours, key=cv2.contourArea)
+                if cv2.contourArea(largest_contour) >= MIN_AREA:
+                    green_found = True
+
+            # Print notice to console handling the cooldown window
             now = time.time()
-
-            if found and (now - last_detection_time) >= COOLDOWN_SECONDS:
-                print("green detected\r")
+            if green_found and (now - last_detection_time) >= COOLDOWN_SECONDS:
+                print("green detected")
                 last_detection_time = now
 
-            if SHOW_PREVIEW:
-                display = frame.copy()
-                if contour is not None:
-                    x, y, w, h = cv2.boundingRect(contour)
-                    cv2.rectangle(display, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                cv2.imshow("Camera", display)
-                cv2.imshow("Green Mask", mask)
-                # When a preview window is open, it - not the terminal -
-                # has keyboard focus, so also check for space there.
-                if cv2.waitKey(1) & 0xFF == ord(' '):
-                    break
+            # --- USER INTERFACE WINDOW ---
+            # Visual Feedback: Draw bounding box around green targets
+            if green_found and largest_contour is not None:
+                x, y, w, h = cv2.boundingRect(largest_contour)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cv2.putText(frame, "GREEN DETECTED", (x, max(y - 10, 15)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-            # Non-blocking check for a spacebar press in the terminal
-            if key_waiting():
-                key = read_key()
-                if key == ' ':
-                    print("\r\nSpacebar pressed - stopping.")
-                    break
+            # Display streams
+            cv2.imshow("SparkyBot View", frame)
+            cv2.imshow("Vision Target Mask", mask)
+
+            # Capture key inputs safely (30ms wait cycle)
+            key_code = cv2.waitKey(30) & 0xFF
+            key = chr(key_code).lower() if key_code < 256 else ""
+
+            # --- MOVEMENT MAPPING CONTROL ---
+            if key == 'w':          # Forward
+                move_robot(bot, vx=0, vy=SPEED)
+            elif key == 's':        # Backward
+                move_robot(bot, vx=0, vy=-SPEED)
+            elif key == 'a':        # Strafe Left
+                move_robot(bot, vx=-SPEED, vy=0)
+            elif key == 'd':        # Strafe Right
+                move_robot(bot, vx=SPEED, vy=0)
+            elif key == 'u':        # Diagonal Up-Left
+                move_robot(bot, vx=-SPEED, vy=SPEED)
+            elif key == 'y':        # Diagonal Up-Right
+                move_robot(bot, vx=SPEED, vy=SPEED)
+            elif key == 'j':        # Diagonal Back-Left
+                move_robot(bot, vx=-SPEED, vy=-SPEED)
+            elif key == 'h':        # Diagonal Back-Right
+                move_robot(bot, vx=SPEED, vy=-SPEED)
+            
+            # --- INTERACTION CONTROLS ---
+            elif key_code == 32:    # Spacebar captures screenshots
+                timestamp = time.strftime("%Y%m%d-%H%M%S")
+                filename = f"sparky_snap_{timestamp}.jpg"
+                cv2.imwrite(filename, frame)
+                print(f"Saved screenshot: {filename}")
+            
+            elif key_code == 27:    # ESC safely quits out
+                print("\nShutting down controller cleanly.")
+                break
+                
+            else:
+                # Active deadman braking when no movement keys are depressed
+                move_robot(bot, vx=0, vy=0)
 
     except KeyboardInterrupt:
-        print("\r\nStopping.")
+        print("\nEmergency termination initiated.")
     finally:
-        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_terminal_settings)
+        # Resource cleanup safety sequence
+        move_robot(bot, vx=0, vy=0)
+        bot.set_motor(0, 0, 0, 0)
+        bot.disconnect()
         cap.release()
-        if SHOW_PREVIEW:
-            cv2.destroyAllWindows()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ class CameraViewer:
     Provides simple controls and FPS display.
     """
     
-    def __init__(self, camera_index=0, robot_port="/dev/ttyUSB0", robot_baudrate=115200):
+    def __init__(self, camera_index=0, robot_port="/dev/ttyUSB0", robot_baudrate=115200, target_fps=60):
         """
         Initialize camera viewer and robot connection.
         
@@ -24,18 +24,23 @@ class CameraViewer:
             camera_index: USB camera index (default: 0)
             robot_port: Serial port for SparkyBotMini (default: /dev/ttyUSB0)
             robot_baudrate: Baud rate for serial communication (default: 115200)
+            target_fps: Target frames per second (default: 60)
         """
         self.camera_index = camera_index
         self.camera = None
+        self.target_fps = target_fps
+        self.frame_time = 1.0 / target_fps
         
         # Initialize robot
         self.robot = SparkyBotMini(port=robot_port, baudrate=robot_baudrate, debug=False)
         self.robot_connected = False
         
-        # FPS tracking
+        # FPS tracking (optimized)
         self.frame_count = 0
         self.start_time = time.time()
         self.fps = 0
+        self.last_fps_update = time.time()
+        self.fps_update_interval = 1.0  # Update FPS display every 1 second
         
     def connect_robot(self):
         """
@@ -62,7 +67,7 @@ class CameraViewer:
     
     def initialize_camera(self):
         """
-        Initialize USB camera.
+        Initialize USB camera with optimized settings.
         
         Returns:
             bool: True if camera initialized successfully, False otherwise
@@ -74,11 +79,15 @@ class CameraViewer:
             print("✗ Failed to open camera!")
             return False
         
-        # Set camera properties for better performance
+        # Optimized camera properties for better performance
         self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        self.camera.set(cv2.CAP_PROP_FPS, 30)
-        self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer for lower latency
+        self.camera.set(cv2.CAP_PROP_FPS, self.target_fps)
+        self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize buffer for low latency
+        
+        # Additional optimizations
+        self.camera.set(cv2.CAP_PROP_AUTOFOCUS, 1)  # Enable autofocus
+        self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # Enable auto exposure
         
         print("✓ Camera initialized successfully!")
         print(f"  Resolution: {int(self.camera.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
@@ -89,67 +98,58 @@ class CameraViewer:
     
     def calculate_fps(self):
         """
-        Calculate current FPS.
+        Calculate current FPS (optimized - only update periodically).
         
         Returns:
             float: Frames per second
         """
         self.frame_count += 1
+        current_time = time.time()
         
-        if self.frame_count % 30 == 0:  # Update every 30 frames
-            current_time = time.time()
-            elapsed = current_time - self.start_time
-            if elapsed > 0:
-                self.fps = self.frame_count / elapsed
+        # Only update FPS display every interval
+        if current_time - self.last_fps_update >= self.fps_update_interval:
+            elapsed = current_time - self.last_fps_update
+            self.fps = self.frame_count / elapsed if elapsed > 0 else 0
+            self.frame_count = 0
+            self.last_fps_update = current_time
         
         return self.fps
     
     def display_info(self, frame):
         """
         Add information overlay to frame (FPS, instructions).
+        Optimized to draw only necessary elements.
         
         Args:
             frame: Video frame to annotate
         """
-        # Display FPS
+        # Display FPS (only essential info on every frame)
         fps_text = f"FPS: {self.fps:.1f}"
         cv2.putText(frame, fps_text, (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
         
         # Display connection status
         if self.robot_connected:
-            status_text = "Robot: Connected"
+            status_text = "Robot: ✓"
             status_color = (0, 255, 0)
         else:
-            status_text = "Robot: Not Connected"
+            status_text = "Robot: ✗"
             status_color = (0, 0, 255)
         
-        cv2.putText(frame, status_text, (10, 70),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
-        
-        # Display instructions
-        instructions = [
-            "Controls:",
-            "  's' - Capture screenshot",
-            "  'r' - Reset FPS counter",
-            "  'q' - Quit"
-        ]
-        
-        y_offset = 120
-        for instruction in instructions:
-            cv2.putText(frame, instruction, (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-            y_offset += 25
+        cv2.putText(frame, status_text, (10, 55),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 1)
     
     def run(self):
         """
         Main loop: capture and display live video feed.
+        Optimized for maximum frame rate.
         Press 'q' to quit, 's' to save a screenshot, 'r' to reset FPS.
         """
         print("Starting live video feed...")
         print("Press 'q' to quit, 's' to capture screenshot, 'r' to reset FPS\n")
         
         screenshot_count = 0
+        frame_timer = time.time()
         
         try:
             while True:
@@ -159,20 +159,24 @@ class CameraViewer:
                     print("✗ Error reading frame from camera!")
                     break
                 
-                # Flip the frame 180 degrees to correct upside-down orientation
+                # Flip the frame 180 degrees (fast in-place operation)
                 frame = cv2.rotate(frame, cv2.ROTATE_180)
                 
                 # Calculate FPS
                 self.calculate_fps()
                 
-                # Add information overlay
+                # Add information overlay (minimal)
                 self.display_info(frame)
                 
                 # Display frame
                 cv2.imshow("SparkybotMini Camera Feed", frame)
                 
-                # Handle keyboard input
-                key = cv2.waitKey(1) & 0xFF
+                # Frame timing control
+                elapsed = time.time() - frame_timer
+                wait_time = max(1, int((self.frame_time - elapsed) * 1000))
+                
+                # Handle keyboard input (non-blocking)
+                key = cv2.waitKey(wait_time) & 0xFF
                 
                 if key == ord('q'):
                     print("\n✓ Quit requested")
@@ -186,9 +190,11 @@ class CameraViewer:
                 
                 elif key == ord('r'):
                     self.frame_count = 0
-                    self.start_time = time.time()
+                    self.last_fps_update = time.time()
                     self.fps = 0
                     print("✓ FPS counter reset")
+                
+                frame_timer = time.time()
         
         except KeyboardInterrupt:
             print("\n⚠ Interrupted by user (Ctrl+C)")
@@ -222,11 +228,12 @@ def main():
     print("SparkybotMini USB Camera Live Feed Viewer")
     print("=" * 60 + "\n")
     
-    # Create viewer instance
+    # Create viewer instance with higher target FPS
     viewer = CameraViewer(
         camera_index=0,
         robot_port="/dev/ttyUSB0",
-        robot_baudrate=115200
+        robot_baudrate=115200,
+        target_fps=60  # Increased from default 30
     )
     
     # Connect to robot (optional - continues if fails)

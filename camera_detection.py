@@ -14,7 +14,7 @@ OUTPUT_NAMES = ["output0"]  # Adjust based on your model's output layer
 
 # Class names - UPDATE THIS with your model's actual class names
 CLASS_NAMES = [
-    "class_0", "class_1", "class_2", "class_3"  # Replace with actual class names
+    "yellow", "green", "stand", "background"  # Replace with actual class names
 ]
 
 def load_model(model_path):

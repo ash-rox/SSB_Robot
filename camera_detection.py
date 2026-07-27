@@ -68,8 +68,8 @@ def postprocess_predictions(output, original_size, confidence_threshold=0.5):
     
     # Scale coordinates to original image size
     orig_h, orig_w = original_size
-    scale_x = orig_w / 640
-    scale_y = orig_h / 640
+    scale_x = orig_w / 320
+    scale_y = orig_h / 320
     
     for i, pred in enumerate(predictions):
         x_center, y_center, width, height = pred[:4] * [scale_x, scale_y, scale_x, scale_y]

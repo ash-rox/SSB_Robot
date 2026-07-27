@@ -27,7 +27,7 @@ def load_model(model_path):
         print(f"Error loading model: {e}")
         return None
 
-def preprocess_image(frame, input_size=640):
+def preprocess_image(frame, input_size=320):
     """Preprocess image for model input"""
     h, w = frame.shape[:2]
     

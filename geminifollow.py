@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-SparkyBotMini - Refined X-Omni Line Follower
-Features: Compact PID control, ROI-first vision processing, holonomic kinematics.
+SparkyBotMini - Dual-PID X-Omni Line Follower
+Uses dual PID controllers (Rotational Yaw + Lateral Strafe) for holonomic line following.
 """
 
 import sys
@@ -17,51 +17,83 @@ CAM_IDX = 0
 WIDTH, HEIGHT = 320, 240
 
 # Vision Settings
-ROI_TOP = 0.60         # Look at bottom 40% of image
+ROI_TOP = 0.60         # Process bottom 40% of the frame
 THRESH_VAL = 70        # Set 0-255, or -1 for Otsu Automatic Thresholding
 INVERT = True          # True = dark line on light floor; False = light line
 MIN_AREA = 200         # Min pixel contour area
 
-# Motion & Kinematics (X-Pattern Omni)
+# Motion Settings
 BASE_SPEED = 20        # Forward speed (Vx)
-KP, KI, KD = 0.20, 0.001, 0.005  # Turning PID Gains
-KP_STRAFE = 0.08       # Proportional Lateral Strafe (Vy)
-MAX_TURN = 30
-MAX_STRAFE = 15
+
+# PID Gains for Yaw Turning (Rotation / Heading Alignment)
+KP_TURN = 0.22
+KI_TURN = 0.001
+KD_TURN = 0.006
+MAX_TURN = 30.0
+
+# PID Gains for Lateral Strafing (Sideways Slide Centering)
+KP_STRAFE = 0.12
+KI_STRAFE = 0.0005
+KD_STRAFE = 0.004
+MAX_STRAFE = 20.0
 
 SHOW_DEBUG = True
 # =========================================================
 
 
-class LineFollower:
-    def __init__(self):
+class PID:
+    """Generic PID Controller with time-delta scaling and anti-windup."""
+    
+    def __init__(self, kp, ki, kd, output_limit, integral_limit=200.0):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.output_limit = output_limit
+        self.integral_limit = integral_limit
+        self.reset()
+
+    def reset(self):
         self.integral = 0.0
         self.prev_error = 0.0
         self.prev_time = time.time()
-        self.kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
 
-    def pid_compute(self, error):
+    def compute(self, error):
         now = time.time()
         dt = max(now - self.prev_time, 1e-4)
         self.prev_time = now
 
-        # Integral with windup clamping
-        self.integral = max(-200.0, min(200.0, self.integral + error * dt))
+        # Anti-windup clamped integral
+        self.integral = max(-self.integral_limit, min(self.integral_limit, self.integral + error * dt))
+        
+        # Derivative term
         derivative = (error - self.prev_error) / dt
         self.prev_error = error
 
-        output = (KP * error) + (KI * self.integral) + (KD * derivative)
-        return max(-MAX_TURN, min(MAX_TURN, output))
+        # Compute output
+        output = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
+        return max(-self.output_limit, min(self.output_limit, output))
+
+
+class LineFollower:
+    def __init__(self):
+        # Dual PID setup: one for turn (yaw), one for strafe (sideways)
+        self.pid_turn = PID(KP_TURN, KI_TURN, KD_TURN, MAX_TURN)
+        self.pid_strafe = PID(KP_STRAFE, KI_STRAFE, KD_STRAFE, MAX_STRAFE)
+        self.kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+
+    def reset_pids(self):
+        self.pid_turn.reset()
+        self.pid_strafe.reset()
 
     def process_frame(self, frame):
-        """Direct ROI cropping and noise filtering for maximum FPS."""
+        """Fast ROI cropping, thresholding, and centroid extraction."""
         h, w = frame.shape[:2]
         roi_y0 = int(h * ROI_TOP)
         
-        # 1. Crop ROI first, then convert color
+        # 1. Crop ROI first to save memory & processing time
         gray_roi = cv2.cvtColor(frame[roi_y0:h, :], cv2.COLOR_BGR2GRAY)
 
-        # 2. Fast Thresholding (Otsu Auto or Manual Cutoff)
+        # 2. Fast Thresholding
         if THRESH_VAL < 0:
             flag = (cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU) if INVERT else (cv2.THRESH_BINARY | cv2.THRESH_OTSU)
             _, mask = cv2.threshold(gray_roi, 0, 255, flag)
@@ -69,7 +101,7 @@ class LineFollower:
             flag = cv2.THRESH_BINARY_INV if INVERT else cv2.THRESH_BINARY
             _, mask = cv2.threshold(gray_roi, THRESH_VAL, 255, flag)
 
-        # 3. Morphological opening to remove small noise dots
+        # 3. Clean up noise specks
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel)
 
         # 4. Find line centroid
@@ -107,18 +139,20 @@ def main():
 
             if cx is not None:
                 lost_count = 0
-                error = cx - (w // 2)
+                error = cx - (w // 2)  # Distance from frame center
 
-                # Corrections: Rotation (PID) & Strafe (P)
-                turn = follower.pid_compute(error)
-                strafe = max(-MAX_STRAFE, min(MAX_STRAFE, error * KP_STRAFE))
+                # Dual PID Calculation
+                turn = follower.pid_turn.compute(error)      # PID Heading Correction (Yaw)
+                strafe = follower.pid_strafe.compute(error)  # PID Lateral Correction (Slide)
 
-                # X-Pattern Omni Kinematics [m1: FL, m2: BL, m3: FR, m4: BR]
+                # X-Pattern Omni Kinematics:
+                # m1: Front Left | m2: Back Left | m3: Front Right | m4: Back Right
                 m1 = BASE_SPEED + strafe + turn
                 m2 = BASE_SPEED - strafe + turn
                 m3 = BASE_SPEED - strafe - turn
                 m4 = BASE_SPEED + strafe - turn
 
+                # Send commands to motors
                 robot.set_motor(
                     int(np.clip(m1, -100, 100)),
                     int(np.clip(m2, -100, 100)),
@@ -129,13 +163,14 @@ def main():
                 lost_count += 1
                 if lost_count > 10:
                     robot.set_motor(0, 0, 0, 0)
+                    follower.reset_pids()
 
             # Optional Debug Render
             if SHOW_DEBUG:
                 if cx is not None:
                     cv2.circle(frame, (cx, roi_y0 + 15), 5, (0, 0, 255), -1)
                 cv2.line(frame, (w // 2, 0), (w // 2, frame.shape[0]), (255, 0, 0), 1)
-                cv2.imshow("Camera", frame)
+                cv2.imshow("Camera View", frame)
                 cv2.imshow("Mask ROI", mask)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break

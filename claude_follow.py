@@ -2,86 +2,58 @@
 # coding: utf-8
 """
 SparkyBotMini Line Follower
-Uses a front-mounted, downward-angled USB camera + PID control to keep
-the robot centered on a line on the ground.
+Uses an OpenCV video feed to find a line on the ground and a PID controller
+to steer the robot so it stays centered on that line.
 
-Wiring/assumption notes:
-- Camera mounted front-center, ~45 deg down toward the ground.
-- Motor mapping assumed: m1 = front-left, m2 = front-right,
-  m3 = rear-left, m4 = rear-right (standard for this chassis).
-  If the robot turns the WRONG way, swap the sign of `turn` below,
-  or swap which motors get + vs - turn.
-- Assumes a DARK line on a LIGHTER floor. If it's the reverse
-  (light line, dark floor), set INVERT_THRESHOLD = False.
+Camera assumption: mounted front-center, angled ~45 degrees down toward the
+ground, so the line appears in the lower-middle portion of the frame.
 
-Place this script in the same folder as your sparkybotmini.py library
-(rename the uploaded file back to sparkybotmini.py), then run:
-    python3 line_follower.py
-Press 'q' in the video window to quit (if SHOW_DEBUG is True), or
-Ctrl+C from the terminal.
+Hardware assumption: 4-wheeled skid-steer drive, where:
+    M1 = front-left,  M2 = front-right
+    M3 = rear-left,   M4 = rear-right
+If your wheels are wired differently, swap the assignments in
+`drive(left_speed, right_speed)` below.
 """
 
-import sys
-import time
-
 import cv2
+import time
 import numpy as np
 
 from sparkybotmini import SparkyBotMini
 
-# ===================== CONFIG (tune these) =====================
 
-SERIAL_PORT = "/dev/ttyUSB0"
-CAMERA_INDEX = 0
-FRAME_WIDTH = 320
-FRAME_HEIGHT = 240
-
-# Vision
-ROI_TOP_FRAC = 0.55      # Only look at the bottom 45% of the frame (closest ground)
-THRESH_VAL = 70          # Brightness cutoff for line vs floor (0-255); tune to your lighting
-INVERT_THRESHOLD = True  # True = dark line on light floor. False = light line on dark floor.
-MIN_LINE_AREA = 300      # Ignore blobs smaller than this (noise)
-LOST_LINE_FRAMES = 10    # Stop motors after this many consecutive frames with no line found
-
-# Motion
-BASE_SPEED = 25          # Forward speed, -100 to 100 ("slowly" per your request)
-MAX_TURN = 30            # Max steering correction applied on top of BASE_SPEED
-
-# PID gains - start conservative, especially at low speed
-KP = 0.35
-KI = 0.02
-KD = 0.15
-INTEGRAL_LIMIT = 40
-
-SHOW_DEBUG = True        # Set False if running headless (no monitor attached)
-
-# =================================================================
-
+# ===================== PID Controller =====================
 
 class PID:
-    """Simple PID controller with anti-windup and output clamping."""
+    """Simple PID controller with output clamping and anti-windup."""
 
-    def __init__(self, kp, ki, kd, output_limit, integral_limit):
+    def __init__(self, kp: float, ki: float, kd: float,
+                 output_limit: float = 100.0, integral_limit: float = 50.0):
         self.kp = kp
         self.ki = ki
         self.kd = kd
         self.output_limit = output_limit
         self.integral_limit = integral_limit
-        self.reset()
+
+        self._integral = 0.0
+        self._prev_error = 0.0
+        self._prev_time = None
 
     def reset(self):
         self._integral = 0.0
         self._prev_error = 0.0
         self._prev_time = None
 
-    def compute(self, error):
+    def update(self, error: float) -> float:
         now = time.time()
         dt = (now - self._prev_time) if self._prev_time is not None else 0.0
         self._prev_time = now
 
+        # Integral term (with clamping to avoid windup)
         self._integral += error * dt
         self._integral = max(-self.integral_limit, min(self.integral_limit, self._integral))
 
+        # Derivative term (guard against divide-by-zero on first call)
         derivative = (error - self._prev_error) / dt if dt > 0 else 0.0
         self._prev_error = error
 
@@ -89,115 +61,183 @@ class PID:
         return max(-self.output_limit, min(self.output_limit, output))
 
 
-def find_line_center(frame, roi_top_frac, thresh_val, invert, min_area):
+# ===================== Line Detection =====================
+
+class LineDetector:
     """
-    Locate the horizontal center (in full-frame pixel coords) of the
-    largest line-like blob in the bottom portion of the frame.
-
-    Returns (cx, roi_y0, mask) where cx is None if no line was found.
+    Finds a dark line on a lighter floor within a horizontal band of the frame.
+    Returns the horizontal offset of the line's centroid from the frame center,
+    in pixels (positive = line is to the right of center).
     """
-    h, w = frame.shape[:2]
-    roi_y0 = int(h * roi_top_frac)
-    roi = frame[roi_y0:h, 0:w]
 
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    def __init__(self, roi_top_ratio: float = 0.55, roi_bottom_ratio: float = 0.9,
+                 min_contour_area: int = 500, invert: bool = False):
+        """
+        Args:
+            roi_top_ratio / roi_bottom_ratio: vertical band of the frame to
+                scan, as a fraction of frame height (0=top, 1=bottom). Given
+                the 45-degree downward camera angle, the line will typically
+                fall somewhere in the lower half of the frame.
+            min_contour_area: ignore contours smaller than this (noise)
+            invert: set True if your line is LIGHT on a DARK floor
+        """
+        self.roi_top_ratio = roi_top_ratio
+        self.roi_bottom_ratio = roi_bottom_ratio
+        self.min_contour_area = min_contour_area
+        self.invert = invert
 
-    thresh_type = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
-    _, mask = cv2.threshold(blurred, thresh_val, 255, thresh_type)
+    def find_line_offset(self, frame):
+        """
+        Returns:
+            (offset_px, debug_frame) where offset_px is None if no line found.
+        """
+        h, w = frame.shape[:2]
+        y1 = int(h * self.roi_top_ratio)
+        y2 = int(h * self.roi_bottom_ratio)
+        roi = frame[y1:y2, 0:w]
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None, roi_y0, mask
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    largest = max(contours, key=cv2.contourArea)
-    if cv2.contourArea(largest) < min_area:
-        return None, roi_y0, mask
+        thresh_type = cv2.THRESH_BINARY_INV if not self.invert else cv2.THRESH_BINARY
+        _, thresh = cv2.threshold(blurred, 0, 255, thresh_type + cv2.THRESH_OTSU)
 
-    moments = cv2.moments(largest)
-    if moments["m00"] == 0:
-        return None, roi_y0, mask
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    cx = int(moments["m10"] / moments["m00"])
-    return cx, roi_y0, mask
+        offset_px = None
+        debug_frame = frame.copy()
+        cv2.rectangle(debug_frame, (0, y1), (w, y2), (255, 0, 0), 1)
+        cv2.line(debug_frame, (w // 2, 0), (w // 2, h), (0, 255, 255), 1)
+
+        if contours:
+            largest = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(largest) >= self.min_contour_area:
+                M = cv2.moments(largest)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    offset_px = cx - (w // 2)
+
+                    # Draw debug info (offset back into full-frame coordinates)
+                    cv2.drawContours(debug_frame, [largest], -1, (0, 255, 0), 2, offset=(0, y1))
+                    cv2.circle(debug_frame, (cx, cy + y1), 5, (0, 0, 255), -1)
+
+        return offset_px, debug_frame
 
 
-def main():
-    robot = SparkyBotMini(port=SERIAL_PORT, debug=False)
-    if not robot.connect():
-        print("Failed to connect to robot. Check SERIAL_PORT.")
-        return 1
+# ===================== Line Follower App =====================
 
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+class LineFollower:
+    def __init__(self, port: str = "/dev/ttyUSB0", camera_index: int = 0,
+                 base_speed: int = 25, max_turn: int = 40,
+                 show_video: bool = True, debug: bool = False):
+        self.robot = SparkyBotMini(port=port, debug=debug)
+        self.camera_index = camera_index
+        self.base_speed = base_speed
+        self.max_turn = max_turn
+        self.show_video = show_video
 
-    if not cap.isOpened():
-        print("Failed to open camera. Check CAMERA_INDEX.")
-        robot.disconnect()
-        return 1
+        self.detector = LineDetector()
+        # Start conservative; tune these for your floor/lighting/speed.
+        self.pid = PID(kp=0.35, ki=0.0, kd=0.15, output_limit=max_turn)
 
-    pid = PID(KP, KI, KD, output_limit=MAX_TURN, integral_limit=INTEGRAL_LIMIT)
-    lost_count = 0
+        self.cap = None
+        self._lost_line_frames = 0
+        self._max_lost_frames = 15  # ~0.5s at 30fps before stopping
 
-    print("Line follower running. Ctrl+C to stop.")
+    def connect(self) -> bool:
+        if not self.robot.connect():
+            return False
 
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("Camera read failed, stopping.")
-                break
+        self.cap = cv2.VideoCapture(self.camera_index)
+        if not self.cap.isOpened():
+            print("? Could not open camera")
+            self.robot.disconnect()
+            return False
 
-            h, w = frame.shape[:2]
-            center_x = w // 2
+        return True
 
-            cx, roi_y0, mask = find_line_center(
-                frame, ROI_TOP_FRAC, THRESH_VAL, INVERT_THRESHOLD, MIN_LINE_AREA
-            )
+    def drive(self, left_speed: float, right_speed: float):
+        """Map left/right speeds to the 4 motors (skid-steer)."""
+        l = int(max(-100, min(100, left_speed)))
+        r = int(max(-100, min(100, right_speed)))
+        # M1=front-left, M2=front-right, M3=rear-left, M4=rear-right
+        self.robot.set_motor(l, r, l, r)
 
-            if cx is None:
-                lost_count += 1
-                if lost_count >= LOST_LINE_FRAMES:
-                    robot.set_motor(0, 0, 0, 0)
-                    pid.reset()
-            else:
-                lost_count = 0
-                # Positive error = line is right of center -> robot should turn right
-                error = cx - center_x
-                turn = pid.compute(error)
+    def stop(self):
+        self.robot.set_motor(0, 0, 0, 0)
 
-                left_speed = max(-100, min(100, BASE_SPEED + turn))
-                right_speed = max(-100, min(100, BASE_SPEED - turn))
+    def run(self):
+        print("? Line following started. Press 'q' in the video window (or Ctrl+C) to stop.")
+        self.pid.reset()
 
-                # m1/m3 = left side, m2/m4 = right side (see notes at top of file)
-                robot.set_motor(int(left_speed), int(right_speed),
-                                 int(left_speed), int(right_speed))
-
-            if SHOW_DEBUG:
-                debug_frame = frame.copy()
-                cv2.line(debug_frame, (center_x, 0), (center_x, h), (255, 0, 0), 1)
-                if cx is not None:
-                    cv2.circle(debug_frame, (cx, roi_y0 + 10), 5, (0, 0, 255), -1)
-                cv2.rectangle(debug_frame, (0, roi_y0), (w, h), (0, 255, 0), 1)
-                cv2.imshow("camera", debug_frame)
-                cv2.imshow("mask", mask)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+        try:
+            while True:
+                ret, frame = self.cap.read()
+                if not ret:
+                    print("? Camera read failed")
                     break
 
-    except KeyboardInterrupt:
-        print("\nInterrupted by user.")
+                offset_px, debug_frame = self.detector.find_line_offset(frame)
 
-    finally:
-        robot.set_motor(0, 0, 0, 0)
-        robot.disconnect()
-        cap.release()
-        if SHOW_DEBUG:
+                if offset_px is not None:
+                    self._lost_line_frames = 0
+
+                    # Normalize offset to roughly [-1, 1] using frame half-width
+                    half_width = frame.shape[1] / 2.0
+                    normalized_error = offset_px / half_width
+
+                    turn = self.pid.update(normalized_error)
+
+                    left_speed = self.base_speed + turn
+                    right_speed = self.base_speed - turn
+                    self.drive(left_speed, right_speed)
+
+                    cv2.putText(debug_frame, f"offset={offset_px}px turn={turn:.1f}",
+                                (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                else:
+                    self._lost_line_frames += 1
+                    if self._lost_line_frames >= self._max_lost_frames:
+                        self.stop()
+                        cv2.putText(debug_frame, "LINE LOST - stopped",
+                                    (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                    # else: keep coasting on last command briefly rather than
+                    # jerking to a stop on a single dropped frame
+
+                if self.show_video:
+                    cv2.imshow("SparkyBot Line Follower", debug_frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+
+        except KeyboardInterrupt:
+            print("\n??  Interrupted by user")
+
+        finally:
+            self.shutdown()
+
+    def shutdown(self):
+        self.stop()
+        if self.cap:
+            self.cap.release()
+        if self.show_video:
             cv2.destroyAllWindows()
-        print("Stopped cleanly.")
+        self.robot.disconnect()
+        print("? Stopped and disconnected")
 
-    return 0
 
+# ===================== Entry Point =====================
 
 if __name__ == "__main__":
-    sys.exit(main())
+    follower = LineFollower(
+        port="/dev/ttyUSB0",
+        camera_index=0,
+        base_speed=25,     # forward speed while following (tune to your floor/robot)
+        max_turn=40,       # max steering correction added/subtracted per side
+        show_video=True,   # set False for headless operation (e.g. SSH without a display)
+        debug=False,
+    )
+
+    if follower.connect():
+        follower.run()
+    else:
+        print("? Failed to start line follower")

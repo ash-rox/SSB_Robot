@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-SparkyBotMini - Fixed Dual-PID X-Omni Line Follower
-Fixes initial startup derivative kick, false edge detection, and immediate stopping.
+SparkyBotMini - Dual-PID X-Omni Line Follower (Sharp 90-Degree Turn Support)
+Features memory-based corner recovery and fast camera frame clearing.
 """
 
 import sys
@@ -17,43 +17,43 @@ CAM_IDX = 0
 WIDTH, HEIGHT = 320, 240
 
 # Vision Settings
-ROI_TOP = 0.60          # Process bottom 40% of the frame
-THRESH_VAL = 70         # Set 0-255, or -1 for Otsu Automatic Thresholding
-INVERT_COLOR = True     # True = dark line on light floor; False = light line
-MIN_AREA = 300          # Higher min area to ignore floor noise/shadows
+ROI_TOP = 0.50          # Slightly larger ROI (bottom 50%) to catch sharp turns early
+THRESH_VAL = 70         # Set 0-255, or -1 for Otsu
+INVERT_COLOR = True     # True = dark line on light floor
+MIN_AREA = 250          
 
 # Motion Settings
-BASE_SPEED = 18         # Slightly reduced for testing startup stability
-INVERT_STEERING = False # Set to True if robot turns AWAY from the line
+BASE_SPEED = 16         # Slightly lower base speed makes 90-degree corners far easier
+INVERT_STEERING = False
 
 # PID Gains
-KP_TURN = 0.08
+KP_TURN = 0.18
 KI_TURN = 0.0005
-KD_TURN = 0.003
-MAX_TURN = 25.0
+KD_TURN = 0.006
+MAX_TURN = 30.0
 
-KP_STRAFE = 0.04
+KP_STRAFE = 0.06
 KI_STRAFE = 0.0002
-KD_STRAFE = 0.002
-MAX_STRAFE = 15.0
+KD_STRAFE = 0.003
+MAX_STRAFE = 18.0
 
-LOST_LINE_FRAMES = 35   # Allow ~0.5s before stopping
+# Sharp Corner Recovery
+PIVOT_SPEED = 25        # Spin speed when performing a corner recovery pivot
+LOST_LINE_FRAMES = 45   # ~1.0 sec before full emergency stop
 SHOW_DEBUG = True
 # =========================================================
 
 
 class PID:
     def __init__(self, kp, ki, kd, output_limit, integral_limit=150.0):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
+        self.kp, self.ki, self.kd = kp, ki, kd
         self.output_limit = output_limit
         self.integral_limit = integral_limit
         self.reset()
 
     def reset(self):
         self.integral = 0.0
-        self.prev_error = None  # None indicates unitialized (prevents spike)
+        self.prev_error = None
         self.prev_time = time.time()
 
     def compute(self, error):
@@ -61,7 +61,6 @@ class PID:
         dt = max(now - self.prev_time, 1e-4)
         self.prev_time = now
 
-        # Prevent derivative kick on first execution
         if self.prev_error is None:
             self.prev_error = error
 
@@ -78,16 +77,18 @@ class LineFollower:
         self.pid_turn = PID(KP_TURN, KI_TURN, KD_TURN, MAX_TURN)
         self.pid_strafe = PID(KP_STRAFE, KI_STRAFE, KD_STRAFE, MAX_STRAFE)
         self.kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        self.last_valid_x = WIDTH // 2  # Remembers last seen X coordinate
 
     def reset_pids(self):
         self.pid_turn.reset()
         self.pid_strafe.reset()
+        self.last_valid_x = WIDTH // 2
 
     def process_frame(self, frame):
         h, w = frame.shape[:2]
         roi_y0 = int(h * ROI_TOP)
         
-        # 1. Crop ROI first
+        # 1. Crop ROI
         gray_roi = cv2.cvtColor(frame[roi_y0:h, :], cv2.COLOR_BGR2GRAY)
 
         # 2. Thresholding
@@ -108,7 +109,9 @@ class LineFollower:
             if cv2.contourArea(c) >= MIN_AREA:
                 M = cv2.moments(c)
                 if M["m00"] > 0:
-                    return int(M["m10"] / M["m00"]), roi_y0, mask
+                    cx = int(M["m10"] / M["m00"])
+                    self.last_valid_x = cx  # Save position memory
+                    return cx, roi_y0, mask
 
         return None, roi_y0, mask
 
@@ -121,18 +124,21 @@ def main():
     cap = cv2.VideoCapture(CAM_IDX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
+    
+    # Speed up camera frame rate to reduce motion blur
+    cap.set(cv2.CAP_PROP_FPS, 60)
 
     follower = LineFollower()
     lost_count = 0
 
-    print("Line follower starting... Warmup 1 sec...")
-    time.sleep(1.0)
+    time.sleep(0.5)
 
     try:
         while cap.isOpened():
-            ret, frame = cap.read()
+            # Flush camera buffer to prevent stale video frames
+            cap.grab()
+            ret, frame = cap.retrieve()
             if not ret:
-                print("Failed to grab camera frame.")
                 break
 
             w = frame.shape[1]
@@ -145,15 +151,14 @@ def main():
                 if INVERT_STEERING:
                     error = -error
 
-                # PID Calculations
                 turn = follower.pid_turn.compute(error)
                 strafe = follower.pid_strafe.compute(error)
 
                 # X-Pattern Omni Kinematics
-                m1 = BASE_SPEED - strafe - turn  # Front Left
-                m2 = BASE_SPEED + strafe - turn  # Back Left
-                m3 = BASE_SPEED + strafe + turn  # Front Right
-                m4 = BASE_SPEED - strafe + turn  # Back Right
+                m1 = BASE_SPEED - strafe - turn
+                m2 = BASE_SPEED + strafe - turn
+                m3 = BASE_SPEED + strafe + turn
+                m4 = BASE_SPEED - strafe + turn
 
                 robot.set_motor(
                     int(np.clip(m1, -100, 100)),
@@ -163,18 +168,29 @@ def main():
                 )
             else:
                 lost_count += 1
-                if lost_count == 1:
-                    print("Line lost, waiting...")
-                if lost_count >= LOST_LINE_FRAMES:
-                    print("Line lost timeout. Stopping motors.")
+                
+                # --- RECOVERY LOGIC FOR SHARP 90-DEGREE CORNERS ---
+                if lost_count < LOST_LINE_FRAMES:
+                    # Determine which direction the line vanished towards
+                    if follower.last_valid_x < (w // 2):
+                        # Line vanished to the LEFT -> Spin Left in place
+                        robot.set_motor(-PIVOT_SPEED, -PIVOT_SPEED, PIVOT_SPEED, PIVOT_SPEED)
+                    else:
+                        # Line vanished to the RIGHT -> Spin Right in place
+                        robot.set_motor(PIVOT_SPEED, PIVOT_SPEED, -PIVOT_SPEED, -PIVOT_SPEED)
+                else:
+                    # Full stop after grace period expires
                     robot.set_motor(0, 0, 0, 0)
                     follower.reset_pids()
 
-            # Debug Visualizer
             if SHOW_DEBUG:
                 debug_img = frame.copy()
                 if cx is not None:
                     cv2.circle(debug_img, (cx, roi_y0 + 15), 5, (0, 0, 255), -1)
+                else:
+                    cv2.putText(debug_img, "CORNER SEARCH", (20, 30), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+
                 cv2.line(debug_img, (w // 2, 0), (w // 2, frame.shape[0]), (255, 0, 0), 1)
                 cv2.rectangle(debug_img, (0, roi_y0), (w, frame.shape[0]), (0, 255, 0), 1)
 

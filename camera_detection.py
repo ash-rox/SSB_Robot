@@ -3,11 +3,12 @@ import numpy as np
 import onnxruntime as rt
 import time
 from pathlib import Path
-from sparkybotmini import SparkyBotMini
+from sparky_bot import SparkyBotMini
 
 # Configuration
 MODEL_PATH = "best.onnx"
 CONFIDENCE_THRESHOLD = 0.5
+IOU_THRESHOLD = 0.45       # Cleans up duplicate overlapping bounding boxes
 INPUT_SIZE = 320  
 INPUT_NAME = "images"
 OUTPUT_NAMES = ["output0"]
@@ -29,7 +30,7 @@ def load_model(model_path):
         print(f"Error loading model: {e}")
         return None
 
-def preprocess_image(frame, input_size=320):
+def preprocess_image(frame, input_size=640):
     h, w = frame.shape[:2]
     img = cv2.resize(frame, (input_size, input_size))
     img = img.astype(np.float32) / 255.0
@@ -37,50 +38,63 @@ def preprocess_image(frame, input_size=320):
     img = np.expand_dims(img, 0)        
     return img, (h, w)
 
-def postprocess_predictions(outputs, original_size, input_size=320, confidence_threshold=0.5):
+def postprocess_predictions(outputs, original_size, input_size=640, confidence_threshold=0.5, iou_threshold=0.45):
+    """Parse standard raw YOLOv11 output tensors [1, 4 + classes, 8400]"""
     detections = []
     orig_h, orig_w = original_size
+    
+    # Remove batch dimension -> shape: [4 + classes, 8400]
     predictions = np.squeeze(outputs)
     
-    if predictions.shape < predictions.shape:
-        predictions = predictions.T
+    # YOLOv11 outputs dimensions in rows. Transpose to shape: [8400, 4 + classes]
+    predictions = predictions.T
 
+    # YOLOv11 structure: [x_center, y_center, width, height, class0_score, class1_score...]
     boxes = predictions[:, :4]
     scores = predictions[:, 4:]
+    
+    # Highest class score defines the confidence
     class_ids = np.argmax(scores, axis=1)
     confidences = np.max(scores, axis=1)
     
+    # Filter arrays using confidence threshold mask
     mask = confidences > confidence_threshold
     boxes = boxes[mask]
     confidences = confidences[mask]
     class_ids = class_ids[mask]
     
-    if len(boxes) == 0: return detections
+    if len(boxes) == 0: 
+        return detections
 
     scale_x = orig_w / input_size
     scale_y = orig_h / input_size
 
-    for i in range(len(boxes)):
-        x_center, y_center, width, height = boxes[i]
-        x_center *= scale_x
-        y_center *= scale_y
-        width *= scale_x
-        height *= scale_y
-        
-        x1 = int(x_center - (width / 2))
-        y1 = int(y_center - (height / 2))
-        x2 = int(x_center + (width / 2))
-        y2 = int(y_center + (height / 2))
-        
-        cid = int(class_ids[i])
-        detections.append({
-            'bbox': (x1, y1, x2, y2),
-            'center': (int(x_center), int(y_center)),
-            'size': int(width * height), 
-            'confidence': float(confidences[i]),
-            'class_id': cid,
-            'class_name': CLASS_NAMES[cid] if cid < len(CLASS_NAMES) else f"id_{cid}"
-        })
+    # Convert center coordinates (xywh) to corner extremes (x1, y1, x2, y2)
+    x_center, y_center, width, height = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    x1 = (x_center - width / 2) * scale_x
+    y1 = (y_center - height / 2) * scale_y
+    x2 = (x_center + width / 2) * scale_x
+    y2 = (y_center + height / 2) * scale_y
+    
+    # Group coordinates into expected format for OpenCV Non-Maximum Suppression
+    nms_boxes = np.stack([x1, y1, x2 - x1, y2 - y1], axis=1).astype(int).tolist()
+    nms_confidences = confidences.astype(float).tolist()
+    
+    indices = cv2.dnn.NMSBoxes(nms_boxes, nms_confidences, confidence_threshold, iou_threshold)
+    
+    if len(indices) > 0:
+        for idx in indices.flatten():
+            bx, by, bw, bh = nms_boxes[idx]
+            cid = int(class_ids[idx])
+            
+            detections.append({
+                'bbox': (bx, by, bx + bw, by + bh),
+                'center': (int(bx + bw // 2), int(by + bh // 2)),
+                'confidence': float(confidences[idx]),
+                'class_id': cid,
+                'class_name': CLASS_NAMES[cid] if cid < len(CLASS_NAMES) else f"id_{cid}"
+            })
+            
     return detections
 
 def process_corn_logic_stationary(detections):
@@ -103,9 +117,9 @@ def process_corn_logic_stationary(detections):
         elif det['class_name'] == "stand":
             found_types.add("STRUCTURAL STAND")
 
-    # Print the specific types found to the terminal screen
+    # Print the specific types found directly to your terminal screen
     if found_types:
-        print(f"Detected: {', '.join(found_types)}")
+        print(f"Detected: {', '.join(found_types)}", flush=True)
 
     # Update onboard LED color based on priority of what is currently seen
     if "RIPE CORN (yellow)" in found_types:
@@ -136,6 +150,8 @@ def draw_detections(frame, detections):
             status_lbl = det['class_name'].upper()
 
         label = f"{status_lbl} [{det['confidence']:.2f}]"
+        
+        # Draw bounding rectangle limits
         cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
         cv2.putText(frame, label, (x1, y1 - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
     return frame
@@ -148,15 +164,19 @@ def main():
         print("Hardware serial interface failed to connect.")
         return
 
-    # Ensure motors are completely stopped/idle at bootup
+    # Keep motors completely stopped
     robot.set_motor(0, 0, 0, 0)
 
     session = load_model(MODEL_PATH)
+    if session is None:
+        robot.disconnect()
+        return
+
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     
-    print("Stationary Identification Engine Active. Press 'q' to stop.")
+    print("Stationary YOLOv11 Identification Engine Active. Press 'q' to stop.")
 
     try:
         while True:
@@ -168,7 +188,7 @@ def main():
             # Run the AI detection frame extraction pipeline
             input_data, original_size = preprocess_image(frame, input_size=INPUT_SIZE)
             outputs = session.run(OUTPUT_NAMES, {INPUT_NAME: input_data})
-            detections = postprocess_predictions(outputs, original_size, INPUT_SIZE, CONFIDENCE_THRESHOLD)
+            detections = postprocess_predictions(outputs, original_size, INPUT_SIZE, CONFIDENCE_THRESHOLD, IOU_THRESHOLD)
             
             # Run stationary print logic
             status_text = process_corn_logic_stationary(detections)

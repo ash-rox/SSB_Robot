@@ -3,7 +3,7 @@ import numpy as np
 import onnxruntime as rt
 import time
 from pathlib import Path
-from sparky_bot import SparkyBotMini
+from sparkybotmini import SparkyBotMini
 
 # Configuration
 MODEL_PATH = "best.onnx"

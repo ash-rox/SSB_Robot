@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import time
-import cv2
+import cv2 
 import numpy as np
 from sparkybotmini import SparkyBotMini  # Import the robot library
 

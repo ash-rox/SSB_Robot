@@ -27,9 +27,9 @@ BASE_SPEED = 16         # Slightly lower base speed makes 90-degree corners far 
 INVERT_STEERING = False
 
 # PID Gains
-KP_TURN = 0.12
+KP_TURN = 0.2
 KI_TURN = 0.0005
-KD_TURN = 0.004
+KD_TURN = 0.006
 MAX_TURN = 30.0
 
 KP_STRAFE = 0.06

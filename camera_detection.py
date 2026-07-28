@@ -1,3 +1,8 @@
+### THIS ONE WORKS 
+### WILL CREATE BOUNDING BOXES AND PRINT RESULTS
+### WAIT FOR RESULTS TO AVERAGE OUT
+
+
 import cv2
 import numpy as np
 import onnxruntime as rt

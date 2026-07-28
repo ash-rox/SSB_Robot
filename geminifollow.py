@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-SparkyBotMini - Dual-PID X-Omni Line Follower
-Uses dual PID controllers (Rotational Yaw + Lateral Strafe) for holonomic line following.
+SparkyBotMini - Dual-PID X-Omni Line Follower (Left/Right Swapped & Reduced Kp)
+Uses dual PID controllers with reduced Kp gains for smoother tracking.
 """
 
 import sys
@@ -25,14 +25,14 @@ MIN_AREA = 200         # Min pixel contour area
 # Motion Settings
 BASE_SPEED = 20        # Forward speed (Vx)
 
-# PID Gains for Yaw Turning (Rotation / Heading Alignment)
-KP_TURN = 0.22
+# REDUCED PID Gains for Yaw Turning (Rotation / Heading Alignment)
+KP_TURN = 0.10         # Reduced from 0.22 for smoother response
 KI_TURN = 0.001
 KD_TURN = 0.006
 MAX_TURN = 30.0
 
-# PID Gains for Lateral Strafing (Sideways Slide Centering)
-KP_STRAFE = 0.12
+# REDUCED PID Gains for Lateral Strafing (Sideways Slide Centering)
+KP_STRAFE = 0.05       # Reduced from 0.12 for gentler strafe corrections
 KI_STRAFE = 0.0005
 KD_STRAFE = 0.004
 MAX_STRAFE = 20.0
@@ -76,7 +76,6 @@ class PID:
 
 class LineFollower:
     def __init__(self):
-        # Dual PID setup: one for turn (yaw), one for strafe (sideways)
         self.pid_turn = PID(KP_TURN, KI_TURN, KD_TURN, MAX_TURN)
         self.pid_strafe = PID(KP_STRAFE, KI_STRAFE, KD_STRAFE, MAX_STRAFE)
         self.kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
@@ -139,20 +138,19 @@ def main():
 
             if cx is not None:
                 lost_count = 0
-                error = cx - (w // 2)  # Distance from frame center
+                error = cx - (w // 2)
 
                 # Dual PID Calculation
-                turn = follower.pid_turn.compute(error)      # PID Heading Correction (Yaw)
-                strafe = follower.pid_strafe.compute(error)  # PID Lateral Correction (Slide)
+                turn = follower.pid_turn.compute(error)
+                strafe = follower.pid_strafe.compute(error)
 
-                # X-Pattern Omni Kinematics:
-                # m1: Front Left | m2: Back Left | m3: Front Right | m4: Back Right
-                m1 = BASE_SPEED + strafe + turn
-                m2 = BASE_SPEED - strafe + turn
-                m3 = BASE_SPEED - strafe - turn
-                m4 = BASE_SPEED + strafe - turn
+                # SWAPPED LEFT & RIGHT KINEMATICS
+                # Signs of 'strafe' and 'turn' inverted across sides
+                m1 = BASE_SPEED - strafe - turn  # Front Left
+                m2 = BASE_SPEED + strafe - turn  # Back Left
+                m3 = BASE_SPEED + strafe + turn  # Front Right
+                m4 = BASE_SPEED - strafe + turn  # Back Right
 
-                # Send commands to motors
                 robot.set_motor(
                     int(np.clip(m1, -100, 100)),
                     int(np.clip(m2, -100, 100)),

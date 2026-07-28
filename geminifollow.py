@@ -23,7 +23,7 @@ INVERT = True          # True = dark line on light floor; False = light line
 MIN_AREA = 200         # Min pixel contour area
 
 # Motion Settings
-BASE_SPEED = 20        # Forward speed (Vx)
+BASE_SPEED = 10        # Forward speed (Vx)
 
 # REDUCED PID Gains for Yaw Turning (Rotation / Heading Alignment)
 KP_TURN = 0.10         # Reduced from 0.22 for smoother response

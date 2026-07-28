@@ -8,7 +8,7 @@ from sparky_bot import SparkyBotMini
 # Configuration
 MODEL_PATH = "best.onnx"
 CONFIDENCE_THRESHOLD = 0.5
-INPUT_SIZE = 640  
+INPUT_SIZE = 320  
 INPUT_NAME = "images"
 OUTPUT_NAMES = ["output0"]
 
@@ -29,7 +29,7 @@ def load_model(model_path):
         print(f"Error loading model: {e}")
         return None
 
-def preprocess_image(frame, input_size=640):
+def preprocess_image(frame, input_size=320):
     h, w = frame.shape[:2]
     img = cv2.resize(frame, (input_size, input_size))
     img = img.astype(np.float32) / 255.0
@@ -37,7 +37,7 @@ def preprocess_image(frame, input_size=640):
     img = np.expand_dims(img, 0)        
     return img, (h, w)
 
-def postprocess_predictions(outputs, original_size, input_size=640, confidence_threshold=0.5):
+def postprocess_predictions(outputs, original_size, input_size=320, confidence_threshold=0.5):
     detections = []
     orig_h, orig_w = original_size
     predictions = np.squeeze(outputs)

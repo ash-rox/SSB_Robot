@@ -21,7 +21,7 @@ robot = None
 
 # Servo Configuration (S1 corresponds to PWM Servo ID 1)
 SERVO_PORT = 1            # Port S1 on the controller
-SERVO_ACTIVE_ANGLE = 120   # Angle to set when "yellow" is detected
+SERVO_ACTIVE_ANGLE = 95   # Angle to set when "yellow" is detected
 SERVO_IDLE_ANGLE = 0      # Default resting angle
 
 # Global tracker to prevent serial command flooding on every frame

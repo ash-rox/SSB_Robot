@@ -1,3 +1,7 @@
+### THIS ONE WORKS 
+### WILL CREATE BOUNDING BOXES AND PRINT RESULTS
+### WAIT FOR RESULTS TO AVERAGE OUT
+
 import cv2
 import numpy as np
 import onnxruntime as rt
@@ -15,6 +19,11 @@ OUTPUT_NAMES = ["output0"]
 
 # Class maps matching your exact model definitions
 CLASS_NAMES = ["green", "stand", "yellow", "background"]
+
+# Servo Configuration Constants
+SERVO_PORT = "S1"          # Target servo port
+SERVO_ACTIVE_POS = 90     # Angle/position when yellow object is detected
+SERVO_IDLE_POS = 0        # Angle/position when no yellow object is detected
 
 robot = None
 
@@ -137,12 +146,12 @@ def postprocess_predictions(outputs, original_size, input_size=INPUT_SIZE, confi
 def process_corn_logic_stationary(detections):
     """
     Identifies the detected types, prints them to the terminal, 
-    sets indicator lights, and controls the S1 servo.
+    sets indicator lights, and actuates the S1 servo on yellow detection.
     """
     if not detections:
         try:
-            robot.set_led(1, 0, 0, 0)   # Turn off LED if nothing is seen
-            robot.set_servo(1, 0)       # Reset servo on S1 to 0 degrees
+            robot.set_led(1, 0, 0, 0) # Turn off LED if nothing is seen
+            robot.set_servo(SERVO_PORT, SERVO_IDLE_POS) # Reset servo to idle
         except Exception:
             pass
         return "Scanning... No targets in view."
@@ -160,18 +169,18 @@ def process_corn_logic_stationary(detections):
     if found_types:
         print(f"Detected: {', '.join(found_types)}", flush=True)
 
+    # LED & Servo Logic
     try:
-        # Check specifically for Yellow detection to control Servo S1
         if "RIPE CORN (yellow)" in found_types:
-            robot.set_led(1, 0, 255, 0)  # Solid GREEN light for ripe corn presence
-            robot.set_servo(1, 90)       # Activate Servo on Port S1 (set angle to 90°)
+            robot.set_led(1, 0, 255, 0)              # Solid GREEN light for ripe corn
+            robot.set_servo(SERVO_PORT, SERVO_ACTIVE_POS) # Activate S1 Servo
         else:
-            robot.set_servo(1, 0)        # Return Servo on Port S1 to resting position (0°)
+            robot.set_servo(SERVO_PORT, SERVO_IDLE_POS)   # Reset S1 Servo when yellow isn't seen
 
-            if "UNRIPE CORN (green)" in found_types:
-                robot.set_led(1, 255, 0, 0)  # Solid RED light for unripe corn presence
-            elif "STRUCTURAL STAND" in found_types:
-                robot.set_led(1, 0, 0, 255)  # Solid BLUE light if only a stand is visible
+        if "UNRIPE CORN (green)" in found_types and "RIPE CORN (yellow)" not in found_types:
+            robot.set_led(1, 255, 0, 0)              # Solid RED light for unripe corn
+        elif "STRUCTURAL STAND" in found_types and "RIPE CORN (yellow)" not in found_types:
+            robot.set_led(1, 0, 0, 255)              # Solid BLUE light if only stand is visible
     except Exception:
         pass
 
@@ -209,7 +218,7 @@ def main():
 
     try:
         robot.set_motor(0, 0, 0, 0)
-        robot.set_servo(1, 0)  # Initialize Servo on Port S1 to default 0 degrees
+        robot.set_servo(SERVO_PORT, SERVO_IDLE_POS) # Initialize Servo to idle position
     except Exception:
         pass
 
@@ -279,7 +288,7 @@ def main():
         try:
             robot.set_motor(0, 0, 0, 0)
             robot.set_led(1, 0, 0, 0)
-            robot.set_servo(1, 0)  # Ensure servo resets on cleanup
+            robot.set_servo(SERVO_PORT, SERVO_IDLE_POS) # Reset servo on shutdown
         except Exception:
             pass
         cap.release()

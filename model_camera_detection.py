@@ -19,7 +19,7 @@ INPUT_NAME = "images"
 OUTPUT_NAMES = ["output0"]
 
 # Class maps matching your exact model definitions
-CLASS_NAMES = ["green", "stand", "yellow", "background"]
+CLASS_NAMES = ["green", "stand", "stand", "yellow"]
 
 robot = None
 

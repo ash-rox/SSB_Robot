@@ -19,21 +19,22 @@ CLASS_NAMES = ["green", "stand", "yellow", "background"]
 
 robot = None
 
-# Servo Configuration
-SERVO_PORT = 1            # S1 Port on motor controller (Try 1 or "S1" if needed)
+# Servo Configuration (S1 corresponds to PWM Servo ID 1)
+SERVO_PORT = 1            # Port S1 on the controller
 SERVO_ACTIVE_ANGLE = 90   # Angle to set when "yellow" is detected
 SERVO_IDLE_ANGLE = 0      # Default resting angle
 
-# Global tracker to prevent flooding serial commands on every frame
+# Global tracker to prevent serial command flooding on every frame
 current_servo_angle = None 
 
 def set_servo_safe(port, angle):
-    """Sends servo command only if the target angle has changed."""
+    """Sends PWM servo command only if the target angle changes."""
     global current_servo_angle
     if current_servo_angle != angle:
         try:
-            print(f"[SERVO] Setting port {port} to {angle}°")
-            robot.set_servo(port, angle)
+            print(f"[SERVO] Setting S{port} to {angle}°")
+            # FIXED: Changed set_servo to set_pwm_servo
+            robot.set_pwm_servo(port, angle)
             current_servo_angle = angle
         except Exception as e:
             print(f"[SERVO ERROR] Failed to move servo: {e}")
@@ -135,10 +136,10 @@ def postprocess_predictions(outputs, original_size, input_size=INPUT_SIZE, confi
     return detections
 
 def process_corn_logic_stationary(detections):
-    """Identifies targets and activates the servo only on state change."""
+    """Identifies targets and activates the PWM servo on state change."""
     if not detections:
         try:
-            robot.set_led(1, 0, 0, 0)  # Off
+            robot.set_led(1, 0, 0, 0)
         except Exception:
             pass
         set_servo_safe(SERVO_PORT, SERVO_IDLE_ANGLE)
@@ -158,20 +159,19 @@ def process_corn_logic_stationary(detections):
     if found_types:
         print(f"Detected: {', '.join(found_types)}", flush=True)
 
-    # Servo Action based on yellow detection
+    # Move S1 PWM servo when Yellow is detected
     if "RIPE CORN (yellow)" in found_types:
         set_servo_safe(SERVO_PORT, SERVO_ACTIVE_ANGLE)
     else:
         set_servo_safe(SERVO_PORT, SERVO_IDLE_ANGLE)
 
-    # LED Feedback
     try:
         if "RIPE CORN (yellow)" in found_types:
-            robot.set_led(1, 0, 255, 0)   # Solid GREEN LED
+            robot.set_led(1, 0, 255, 0)   # Green LED
         elif "UNRIPE CORN (green)" in found_types:
-            robot.set_led(1, 255, 0, 0)   # Solid RED LED
+            robot.set_led(1, 255, 0, 0)   # Red LED
         elif "STRUCTURAL STAND" in found_types:
-            robot.set_led(1, 0, 0, 255)   # Solid BLUE LED
+            robot.set_led(1, 0, 0, 255)   # Blue LED
     except Exception:
         pass
 
@@ -274,7 +274,7 @@ def main():
         try:
             robot.set_motor(0, 0, 0, 0)
             robot.set_led(1, 0, 0, 0)
-            robot.set_servo(SERVO_PORT, SERVO_IDLE_ANGLE)
+            robot.set_pwm_servo(SERVO_PORT, SERVO_IDLE_ANGLE)
         except Exception:
             pass
         cap.release()

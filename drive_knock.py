@@ -18,16 +18,18 @@ CLASS_NAMES = ["green", "stand", "yellow", "background"]
 
 # Robot Control Parameters
 SERIAL_PORT = "/dev/ttyUSB0"
-SEARCH_SPEED = 10             # Cruise speed while searching for corn
-MIN_ADJUST_SPEED = 5         # Minimum motor power to overcome static friction
-MAX_ADJUST_SPEED = 7         # Maximum speed cap during centering
-KP_CENTERING = 0.15           # Proportional gain: scales motor speed based on Y-error
+SEARCH_SPEED = 20             # Cruise speed while searching for corn
+MIN_ADJUST_SPEED = 12         # Minimum motor power to overcome static friction
+MAX_ADJUST_SPEED = 25         # Maximum speed cap during centering
+KP_CENTERING = 0.12           # Proportional gain for gentle centering adjustments
 
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
 TARGET_CENTER_Y = 240         # Ideal Y-coordinate center for swinging range
-Y_TOLERANCE = 15              # Tight pixel tolerance (+/-) for precise center alignment
-SETTLE_TIME = 0.3             # Seconds to hold position before swinging to ensure stability
+
+# ADJUSTED FOR LENIENCY:
+Y_TOLERANCE = 30              # Increased deadband (+/- 30px) for quicker target acquisition
+SETTLE_TIME = 0.15            # Brief pause before swinging (seconds)
 
 # Servo Arm Configuration
 SERVO_PORT = 1                # Port S1
@@ -139,7 +141,7 @@ def get_target_yellow_corn(detections):
 
 
 def draw_overlay(frame, detections, state, current_target):
-    # Draw horizontal center alignment deadband
+    # Visual tolerance band (Yellow lines show the active target window)
     cv2.line(frame, (0, TARGET_CENTER_Y - Y_TOLERANCE), (FRAME_WIDTH, TARGET_CENTER_Y - Y_TOLERANCE), (0, 255, 255), 1)
     cv2.line(frame, (0, TARGET_CENTER_Y + Y_TOLERANCE), (FRAME_WIDTH, TARGET_CENTER_Y + Y_TOLERANCE), (0, 255, 255), 1)
     cv2.line(frame, (0, TARGET_CENTER_Y), (FRAME_WIDTH, TARGET_CENTER_Y), (0, 255, 0), 1)
@@ -150,12 +152,11 @@ def draw_overlay(frame, detections, state, current_target):
         cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
         cv2.circle(frame, det['center'], 4, (0, 0, 255), -1)
 
-    # Status Display
     cv2.putText(frame, f"STATE: {state}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     if current_target:
         cy = current_target['center'][1]
         error = cy - TARGET_CENTER_Y
-        cv2.putText(frame, f"Target Y: {cy} | Error: {error}px (Target: {TARGET_CENTER_Y})", (10, 60),
+        cv2.putText(frame, f"Target Y: {cy} | Error: {error}px (Band: +/-{Y_TOLERANCE}px)", (10, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
     return frame
 
@@ -192,10 +193,10 @@ def main():
     robot.set_pwm_servo(SERVO_PORT, SERVO_IDLE_ANGLE)
 
     current_state = STATE_SEARCH
-    servo_state = False  # Toggle switch for swinging arm
-    is_settled = False   # Tracks if robot came to a full stop on target
+    servo_state = False
+    is_settled = False
 
-    print("[SYSTEM] Precision Alignment Engine Active. Press 'q' or Ctrl+C to stop.")
+    print("[SYSTEM] Lenient Alignment Engine Active. Press 'q' or Ctrl+C to stop.")
 
     try:
         while True:
@@ -210,7 +211,7 @@ def main():
             target = get_target_yellow_corn(detections)
 
             if target is None:
-                # SEARCH MODE: Drive forward smoothly
+                # SEARCH MODE
                 current_state = STATE_SEARCH
                 is_settled = False
                 robot.set_led(1, 0, 0, 0)
@@ -219,42 +220,36 @@ def main():
 
             else:
                 center_y = target['center'][1]
-                y_error = center_y - TARGET_CENTER_Y  # Negative = target is above center line (move forward)
+                y_error = center_y - TARGET_CENTER_Y
 
-                # PERFECTLY CENTERED
+                # TARGET WITHIN LENIENT WINDOW (+/- 30 pixels)
                 if abs(y_error) <= Y_TOLERANCE:
                     current_state = STATE_SWING
                     robot.set_motor(0, 0, 0, 0)
-                    robot.set_led(1, 0, 255, 0)          # Green LED (Locked On)
+                    robot.set_led(1, 0, 255, 0)
 
-                    # Pause momentarily on the first frame it becomes perfectly centered
                     if not is_settled:
                         time.sleep(SETTLE_TIME)
                         is_settled = True
 
-                    # Alternate arm swing angles continuously until corn disappears
                     target_angle = SERVO_STRIKE_ANGLE if servo_state else SERVO_IDLE_ANGLE
                     robot.set_pwm_servo(SERVO_PORT, target_angle)
                     servo_state = not servo_state
                     time.sleep(SWING_DELAY)
 
-                # ADJUSTING (TOO FAR OR TOO CLOSE)
+                # ADJUSTING POSITION
                 else:
                     current_state = STATE_CENTER
                     is_settled = False
-                    robot.set_led(1, 255, 255, 0)        # Yellow LED (Centering)
+                    robot.set_led(1, 255, 255, 0)
                     robot.set_pwm_servo(SERVO_PORT, SERVO_IDLE_ANGLE)
 
-                    # Compute proportional speed: moves faster when far, crawls when close
                     speed_magnitude = abs(y_error) * KP_CENTERING
                     speed_magnitude = max(MIN_ADJUST_SPEED, min(MAX_ADJUST_SPEED, speed_magnitude))
 
-                    # If y_error < 0: object is higher in frame -> Drive FORWARD to bring target down
-                    # If y_error > 0: object is lower in frame -> Drive BACKWARD to bring target up
                     motor_speed = int(speed_magnitude) if y_error < 0 else -int(speed_magnitude)
                     robot.set_motor(motor_speed, motor_speed, motor_speed, motor_speed)
 
-            # Overlay view
             frame = draw_overlay(frame, detections, current_state, target)
             cv2.imshow("Autodrive Corn Classifier", frame)
 

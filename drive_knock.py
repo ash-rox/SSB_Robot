@@ -19,8 +19,8 @@ CLASS_NAMES = ["green", "stand", "yellow", "background"]
 
 # Robot Control Parameters
 SERIAL_PORT = "/dev/ttyUSB0"
-DRIVE_SPEED = 15              # Speed for general forward driving (-100 to 100)
-ADJUST_SPEED = 8             # Fine-tuning speed when centering
+DRIVE_SPEED = 10              # Speed for general forward driving (-100 to 100)
+ADJUST_SPEED = 5             # Fine-tuning speed when centering
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
 TARGET_CENTER_Y = 240         # Ideal Y-coordinate center for swinging range

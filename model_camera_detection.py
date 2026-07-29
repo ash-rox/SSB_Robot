@@ -1,3 +1,5 @@
+###WORKS
+
 ### STATIONARY CORN CLASSIFIER - YOLOV11 OPTIMIZED
 import cv2
 import numpy as np

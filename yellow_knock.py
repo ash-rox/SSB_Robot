@@ -20,9 +20,23 @@ CLASS_NAMES = ["green", "stand", "yellow", "background"]
 robot = None
 
 # Servo Configuration
-SERVO_PORT = 1            # S1 Port on motor controller
+SERVO_PORT = 1            # S1 Port on motor controller (Try 1 or "S1" if needed)
 SERVO_ACTIVE_ANGLE = 90   # Angle to set when "yellow" is detected
 SERVO_IDLE_ANGLE = 0      # Default resting angle
+
+# Global tracker to prevent flooding serial commands on every frame
+current_servo_angle = None 
+
+def set_servo_safe(port, angle):
+    """Sends servo command only if the target angle has changed."""
+    global current_servo_angle
+    if current_servo_angle != angle:
+        try:
+            print(f"[SERVO] Setting port {port} to {angle}°")
+            robot.set_servo(port, angle)
+            current_servo_angle = angle
+        except Exception as e:
+            print(f"[SERVO ERROR] Failed to move servo: {e}")
 
 def load_model(model_path):
     """Load ONNX model optimized for Raspberry Pi 5 CPU"""
@@ -37,28 +51,15 @@ def load_model(model_path):
         return None
 
 def preprocess_image(frame, input_size=INPUT_SIZE):
-    """
-    Preprocesses frame for YOLOv11 model inference.
-    Converts OpenCV BGR frame to RGB (Critical for Yellow/Ripe Corn detection).
-    """
     h, w = frame.shape[:2]
-    
-    # FIX: Convert BGR (OpenCV default) to RGB expected by YOLO models
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    
     img = cv2.resize(rgb_frame, (input_size, input_size))
     img = img.astype(np.float32) / 255.0
-    img = np.transpose(img, (2, 0, 1))  # Convert HWC to CHW format
-    img = np.expand_dims(img, 0)        # Add batch dimension [1, C, H, W]
+    img = np.transpose(img, (2, 0, 1))
+    img = np.expand_dims(img, 0)
     return img, (h, w)
 
 def postprocess_predictions(outputs, original_size, input_size=INPUT_SIZE, confidence_threshold=0.5, iou_threshold=0.45):
-    """
-    Parses YOLOv11 ONNX outputs.
-    YOLOv11 output structure: [1, 4 + num_classes, num_anchors]
-      - Indices 0..3: Box coordinates (x_center, y_center, width, height)
-      - Indices 4..N: Direct class probability scores
-    """
     detections = []
     orig_h, orig_w = original_size
 
@@ -69,17 +70,14 @@ def postprocess_predictions(outputs, original_size, input_size=INPUT_SIZE, confi
 
     predictions = np.squeeze(outputs)
 
-    # YOLOv11 outputs shape (4 + num_classes, anchors). Transpose to (anchors, 4 + num_classes)
     if predictions.ndim == 2 and predictions.shape[0] < predictions.shape[1]:
         predictions = predictions.T
 
     if predictions.ndim != 2 or predictions.shape[1] < 5:
-        print(f"Unexpected prediction shape: {predictions.shape}")
         return detections
 
-    # Separate bounding box coordinates from class confidence scores
     boxes = predictions[:, :4]
-    scores = predictions[:, 4:]  # Direct class confidence scores in YOLOv11
+    scores = predictions[:, 4:]
 
     if scores.ndim == 1:
         scores = scores[:, np.newaxis]
@@ -87,7 +85,6 @@ def postprocess_predictions(outputs, original_size, input_size=INPUT_SIZE, confi
     class_ids = np.argmax(scores, axis=1)
     confidences = np.max(scores, axis=1)
 
-    # Filter out weak detections
     mask = confidences > confidence_threshold
     boxes = boxes[mask]
     confidences = confidences[mask]
@@ -96,7 +93,6 @@ def postprocess_predictions(outputs, original_size, input_size=INPUT_SIZE, confi
     if boxes.shape[0] == 0:
         return detections
 
-    # Scale coordinates back to original camera resolution
     scale_x = orig_w / input_size
     scale_y = orig_h / input_size
 
@@ -110,7 +106,6 @@ def postprocess_predictions(outputs, original_size, input_size=INPUT_SIZE, confi
     x2 = (x_center + width / 2).astype(int)
     y2 = (y_center + height / 2).astype(int)
 
-    # Format bounding boxes for OpenCV Non-Maximum Suppression (NMS)
     nms_boxes = np.stack([x1, y1, (x2 - x1), (y2 - y1)], axis=1).tolist()
     nms_confidences = confidences.astype(float).tolist()
 
@@ -140,13 +135,13 @@ def postprocess_predictions(outputs, original_size, input_size=INPUT_SIZE, confi
     return detections
 
 def process_corn_logic_stationary(detections):
-    """Identifies detected targets, updates LEDs, and triggers S1 servo on yellow detection."""
+    """Identifies targets and activates the servo only on state change."""
     if not detections:
         try:
             robot.set_led(1, 0, 0, 0)  # Off
-            robot.set_servo(SERVO_PORT, SERVO_IDLE_ANGLE)  # Reset servo
         except Exception:
             pass
+        set_servo_safe(SERVO_PORT, SERVO_IDLE_ANGLE)
         return "Scanning... No targets in view."
 
     found_types = set()
@@ -163,38 +158,40 @@ def process_corn_logic_stationary(detections):
     if found_types:
         print(f"Detected: {', '.join(found_types)}", flush=True)
 
+    # Servo Action based on yellow detection
+    if "RIPE CORN (yellow)" in found_types:
+        set_servo_safe(SERVO_PORT, SERVO_ACTIVE_ANGLE)
+    else:
+        set_servo_safe(SERVO_PORT, SERVO_IDLE_ANGLE)
+
+    # LED Feedback
     try:
         if "RIPE CORN (yellow)" in found_types:
-            robot.set_led(1, 0, 255, 0)   # Solid GREEN LED for ripe corn
-            robot.set_servo(SERVO_PORT, SERVO_ACTIVE_ANGLE)  # Move Servo S1 to active angle
-        else:
-            robot.set_servo(SERVO_PORT, SERVO_IDLE_ANGLE)    # Reset Servo S1 when no yellow detected
-
-        if "UNRIPE CORN (green)" in found_types and "RIPE CORN (yellow)" not in found_types:
-            robot.set_led(1, 255, 0, 0)   # Solid RED LED for unripe corn
-        elif "STRUCTURAL STAND" in found_types and "RIPE CORN (yellow)" not in found_types:
-            robot.set_led(1, 0, 0, 255)   # Solid BLUE LED for stand
+            robot.set_led(1, 0, 255, 0)   # Solid GREEN LED
+        elif "UNRIPE CORN (green)" in found_types:
+            robot.set_led(1, 255, 0, 0)   # Solid RED LED
+        elif "STRUCTURAL STAND" in found_types:
+            robot.set_led(1, 0, 0, 255)   # Solid BLUE LED
     except Exception:
         pass
 
     return f"In View: {', '.join(found_types)}"
 
 def draw_detections(frame, detections):
-    """Draws bounding boxes on frame (Uses OpenCV BGR color values)."""
     for det in detections:
         x1, y1, x2, y2 = det['bbox']
 
         if det['class_name'] == "yellow":
-            box_color = (0, 255, 255)  # Yellow
+            box_color = (0, 255, 255)
             status_lbl = "RIPE CORN"
         elif det['class_name'] == "green":
-            box_color = (0, 255, 0)    # Green
+            box_color = (0, 255, 0)
             status_lbl = "UNRIPE CORN"
         elif det['class_name'] == "stand":
-            box_color = (255, 255, 0)  # Cyan
+            box_color = (255, 255, 0)
             status_lbl = "STRUCTURAL STAND"
         else:
-            box_color = (255, 0, 0)    # Blue
+            box_color = (255, 0, 0)
             status_lbl = det['class_name'].upper()
 
         label = f"{status_lbl} [{det.get('confidence', 0):.2f}]"
@@ -211,7 +208,7 @@ def main():
 
     try:
         robot.set_motor(0, 0, 0, 0)
-        robot.set_servo(SERVO_PORT, SERVO_IDLE_ANGLE)  # Initialize Servo S1 to idle angle
+        set_servo_safe(SERVO_PORT, SERVO_IDLE_ANGLE)
     except Exception:
         pass
 
@@ -277,7 +274,7 @@ def main():
         try:
             robot.set_motor(0, 0, 0, 0)
             robot.set_led(1, 0, 0, 0)
-            robot.set_servo(SERVO_PORT, SERVO_IDLE_ANGLE)  # Reset servo on exit
+            robot.set_servo(SERVO_PORT, SERVO_IDLE_ANGLE)
         except Exception:
             pass
         cap.release()

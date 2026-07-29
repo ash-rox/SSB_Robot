@@ -26,7 +26,7 @@ INVERT_COLOR = True     # True = dark line on light floor
 MIN_AREA = 250          
 
 # Motion Settings
-BASE_SPEED = 16         # Slightly lower base speed makes 90-degree corners far easier
+BASE_SPEED = 15         # Slightly lower base speed makes 90-degree corners far easier
 INVERT_STEERING = False
 
 # PID Gains

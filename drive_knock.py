@@ -18,11 +18,11 @@ CLASS_NAMES = ["green", "stand", "yellow", "background"]
 
 # Robot Control Parameters
 SERIAL_PORT = "/dev/ttyUSB0"
-SEARCH_SPEED = 22             # Cruise speed while searching for corn
+SEARCH_SPEED = 14           # Cruise speed while searching for corn
 
 # --- CENTERING & DEADBAND FIXES ---
-MIN_ADJUST_SPEED = 25         # Raised minimum speed to break floor friction
-MAX_ADJUST_SPEED = 35         # Upper bound for speed during adjustment
+MIN_ADJUST_SPEED = 5         # Raised minimum speed to break floor friction
+MAX_ADJUST_SPEED = 14         # Upper bound for speed during adjustment
 PULSE_DURATION = 0.08         # Brief motor burst time (seconds) to force motion
 KP_CENTERING = 0.20           # Proportional multiplier for error
 

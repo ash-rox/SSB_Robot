@@ -18,29 +18,33 @@ CLASS_NAMES = ["green", "stand", "yellow", "background"]
 
 # Robot Control Parameters
 SERIAL_PORT = "/dev/ttyUSB0"
-SEARCH_SPEED = 20             # Cruise speed while searching for corn
-MIN_ADJUST_SPEED = 12         # Minimum motor power to overcome static friction
-MAX_ADJUST_SPEED = 25         # Maximum speed cap during centering
-KP_CENTERING = 0.12           # Proportional gain for gentle centering adjustments
+SEARCH_SPEED = 10             # Cruise speed while searching for corn
+MIN_ADJUST_SPEED = 1         # Minimum motor power to overcome static friction
+MAX_ADJUST_SPEED =  8        # Maximum speed cap during centering
+KP_CENTERING = 0.12           # Proportional gain for centering adjustments
 
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
 TARGET_CENTER_Y = 240         # Ideal Y-coordinate center for swinging range
-
-# ADJUSTED FOR LENIENCY:
-Y_TOLERANCE = 30              # Increased deadband (+/- 30px) for quicker target acquisition
-SETTLE_TIME = 0.15            # Brief pause before swinging (seconds)
+Y_TOLERANCE = 30              # Target deadband (+/- 30px)
+SETTLE_TIME = 0.15            # Brief pause before swinging
 
 # Servo Arm Configuration
-SERVO_PORT = 1                # Port S1
+SERVO_PORT = 1                # Port S1 on SparkyBotMini
 SERVO_IDLE_ANGLE = 0          # Rest position
 SERVO_STRIKE_ANGLE = 110      # Full knock stroke angle
 SWING_DELAY = 0.25            # Delay between swing phases (seconds)
 
-# Robot state definitions
+# Retry & Re-centering Parameters
+MAX_SWING_ATTEMPTS = 3        # Max consecutive swings allowed before forcing re-alignment
+REPOSITION_SPEED = 7         # Speed for micro-adjust nudge when retry is triggered
+REPOSITION_TIME = 0.2         # Duration of repositioning nudge (seconds)
+
+# Robot State Definitions
 STATE_SEARCH = "SEARCHING (Driving Forward)"
 STATE_CENTER = "CENTERING (Fine-Tuning Alignment)"
 STATE_SWING = "SWINGING (Knocking Target)"
+STATE_RETRY = "RECENTERING (Retrying Approach)"
 
 
 def load_model(model_path):
@@ -140,8 +144,8 @@ def get_target_yellow_corn(detections):
     return max(yellow_detections, key=lambda d: (d['bbox'][2] - d['bbox'][0]) * (d['bbox'][3] - d['bbox'][1]))
 
 
-def draw_overlay(frame, detections, state, current_target):
-    # Visual tolerance band (Yellow lines show the active target window)
+def draw_overlay(frame, detections, state, current_target, swing_count):
+    # Visual tolerance band
     cv2.line(frame, (0, TARGET_CENTER_Y - Y_TOLERANCE), (FRAME_WIDTH, TARGET_CENTER_Y - Y_TOLERANCE), (0, 255, 255), 1)
     cv2.line(frame, (0, TARGET_CENTER_Y + Y_TOLERANCE), (FRAME_WIDTH, TARGET_CENTER_Y + Y_TOLERANCE), (0, 255, 255), 1)
     cv2.line(frame, (0, TARGET_CENTER_Y), (FRAME_WIDTH, TARGET_CENTER_Y), (0, 255, 0), 1)
@@ -153,11 +157,12 @@ def draw_overlay(frame, detections, state, current_target):
         cv2.circle(frame, det['center'], 4, (0, 0, 255), -1)
 
     cv2.putText(frame, f"STATE: {state}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    
     if current_target:
         cy = current_target['center'][1]
         error = cy - TARGET_CENTER_Y
-        cv2.putText(frame, f"Target Y: {cy} | Error: {error}px (Band: +/-{Y_TOLERANCE}px)", (10, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+        cv2.putText(frame, f"Target Y: {cy} | Error: {error}px | Swings: {swing_count}/{MAX_SWING_ATTEMPTS}", 
+                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
     return frame
 
 
@@ -195,8 +200,9 @@ def main():
     current_state = STATE_SEARCH
     servo_state = False
     is_settled = False
+    swing_count = 0     # Track consecutive swings on the current target
 
-    print("[SYSTEM] Lenient Alignment Engine Active. Press 'q' or Ctrl+C to stop.")
+    print("[SYSTEM] Adaptive Alignment Engine Active. Press 'q' or Ctrl+C to stop.")
 
     try:
         while True:
@@ -211,9 +217,10 @@ def main():
             target = get_target_yellow_corn(detections)
 
             if target is None:
-                # SEARCH MODE
+                # Target knocked down or gone -> Reset swing counter and resume searching
                 current_state = STATE_SEARCH
                 is_settled = False
+                swing_count = 0
                 robot.set_led(1, 0, 0, 0)
                 robot.set_pwm_servo(SERVO_PORT, SERVO_IDLE_ANGLE)
                 robot.set_motor(SEARCH_SPEED, SEARCH_SPEED, SEARCH_SPEED, SEARCH_SPEED)
@@ -222,8 +229,27 @@ def main():
                 center_y = target['center'][1]
                 y_error = center_y - TARGET_CENTER_Y
 
-                # TARGET WITHIN LENIENT WINDOW (+/- 30 pixels)
-                if abs(y_error) <= Y_TOLERANCE:
+                # CHECK IF STUCK SWINGING WITHOUT KNOCKING DOWN CORN
+                if swing_count >= MAX_SWING_ATTEMPTS:
+                    current_state = STATE_RETRY
+                    print(f"[RETRY] Reached {MAX_SWING_ATTEMPTS} swings without success. Reconsidering approach...")
+                    
+                    # Stop swinging arm and reset servo
+                    robot.set_pwm_servo(SERVO_PORT, SERVO_IDLE_ANGLE)
+                    robot.set_led(1, 255, 0, 0)  # Red LED warning
+                    
+                    # Nudge slightly backward to alter distance and force a re-alignment approach
+                    robot.set_motor(-REPOSITION_SPEED, -REPOSITION_SPEED, -REPOSITION_SPEED, -REPOSITION_SPEED)
+                    time.sleep(REPOSITION_TIME)
+                    robot.set_motor(0, 0, 0, 0)
+
+                    # Reset state variables so robot re-centers properly
+                    swing_count = 0
+                    is_settled = False
+                    continue
+
+                # TARGET IS IN CENTER DEADZONE (+/- Y_TOLERANCE)
+                elif abs(y_error) <= Y_TOLERANCE:
                     current_state = STATE_SWING
                     robot.set_motor(0, 0, 0, 0)
                     robot.set_led(1, 0, 255, 0)
@@ -232,25 +258,28 @@ def main():
                         time.sleep(SETTLE_TIME)
                         is_settled = True
 
+                    # Alternate arm position and increment swing count
                     target_angle = SERVO_STRIKE_ANGLE if servo_state else SERVO_IDLE_ANGLE
                     robot.set_pwm_servo(SERVO_PORT, target_angle)
                     servo_state = not servo_state
+                    swing_count += 1
                     time.sleep(SWING_DELAY)
 
-                # ADJUSTING POSITION
+                # TARGET IS OUTSIDE DEADZONE -> FINE TUNE POSITION
                 else:
                     current_state = STATE_CENTER
                     is_settled = False
                     robot.set_led(1, 255, 255, 0)
                     robot.set_pwm_servo(SERVO_PORT, SERVO_IDLE_ANGLE)
 
+                    # Proportional adjustment speed
                     speed_magnitude = abs(y_error) * KP_CENTERING
                     speed_magnitude = max(MIN_ADJUST_SPEED, min(MAX_ADJUST_SPEED, speed_magnitude))
 
                     motor_speed = int(speed_magnitude) if y_error < 0 else -int(speed_magnitude)
                     robot.set_motor(motor_speed, motor_speed, motor_speed, motor_speed)
 
-            frame = draw_overlay(frame, detections, current_state, target)
+            frame = draw_overlay(frame, detections, current_state, target, swing_count)
             cv2.imshow("Autodrive Corn Classifier", frame)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):

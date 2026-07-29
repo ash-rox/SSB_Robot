@@ -1,8 +1,4 @@
-### THIS ONE WORKS 
-### WILL CREATE BOUNDING BOXES AND PRINT RESULTS
-### WAIT FOR RESULTS TO AVERAGE OUT
-
-
+### STATIONARY CORN CLASSIFIER - YOLOV11 OPTIMIZED
 import cv2
 import numpy as np
 import onnxruntime as rt
@@ -18,8 +14,8 @@ INPUT_SIZE = 320
 INPUT_NAME = "images"
 OUTPUT_NAMES = ["output0"]
 
-# Class maps matching your exact model definitions
-CLASS_NAMES = ["green", "stand", "stand", "yellow"]
+# Class maps matching your exact YOLOv11 model definitions
+CLASS_NAMES = ["green", "stand", "yellow", "background"]
 
 robot = None
 
@@ -36,24 +32,31 @@ def load_model(model_path):
         return None
 
 def preprocess_image(frame, input_size=INPUT_SIZE):
+    """
+    Preprocesses frame for YOLOv11 model inference.
+    Converts OpenCV BGR frame to RGB (Critical for Yellow/Ripe Corn detection).
+    """
     h, w = frame.shape[:2]
-    img = cv2.resize(frame, (input_size, input_size))
+    
+    # FIX: Convert BGR (OpenCV default) to RGB expected by YOLO models
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+    img = cv2.resize(rgb_frame, (input_size, input_size))
     img = img.astype(np.float32) / 255.0
-    img = np.transpose(img, (2, 0, 1))
-    img = np.expand_dims(img, 0)
+    img = np.transpose(img, (2, 0, 1))  # Convert HWC to CHW format
+    img = np.expand_dims(img, 0)        # Add batch dimension [1, C, H, W]
     return img, (h, w)
 
 def postprocess_predictions(outputs, original_size, input_size=INPUT_SIZE, confidence_threshold=0.5, iou_threshold=0.45):
-    """Parse model outputs into detection dictionaries.
-
-    Handles outputs returned as a list (session.run(...)) or as a numpy array.
-    Normalizes shapes, optionally transposes heuristically, applies confidence
-    filtering and non-maximum suppression.
+    """
+    Parses YOLOv11 ONNX outputs.
+    YOLOv11 output structure: [1, 4 + num_classes, num_anchors]
+      - Indices 0..3: Box coordinates (x_center, y_center, width, height)
+      - Indices 4..N: Direct class probability scores
     """
     detections = []
     orig_h, orig_w = original_size
 
-    # Accept either list/tuple (session.run) or numpy array
     if isinstance(outputs, (list, tuple)):
         if len(outputs) == 0:
             return detections
@@ -61,30 +64,25 @@ def postprocess_predictions(outputs, original_size, input_size=INPUT_SIZE, confi
 
     predictions = np.squeeze(outputs)
 
-    # Ensure predictions is 2D: single-row -> make it shape (1, N)
-    if predictions.ndim == 1:
-        predictions = predictions[np.newaxis, :]
-
-    # Heuristic: if rows < cols, it's likely transposed
+    # YOLOv11 outputs shape (4 + num_classes, anchors). Transpose to (anchors, 4 + num_classes)
     if predictions.ndim == 2 and predictions.shape[0] < predictions.shape[1]:
         predictions = predictions.T
 
-    # Expect at least 5 columns: x, y, w, h, class_scores...
     if predictions.ndim != 2 or predictions.shape[1] < 5:
-        print(f"Unexpected prediction shape after normalization: {predictions.shape}")
+        print(f"Unexpected prediction shape: {predictions.shape}")
         return detections
 
+    # Separate bounding box coordinates from class confidence scores
     boxes = predictions[:, :4]
-    scores = predictions[:, 4:]
+    scores = predictions[:, 4:]  # Direct class confidence scores in YOLOv11
 
-    # If scores are 1D (single-class) make 2D
     if scores.ndim == 1:
         scores = scores[:, np.newaxis]
 
     class_ids = np.argmax(scores, axis=1)
     confidences = np.max(scores, axis=1)
 
-    # Filter by confidence
+    # Filter out weak detections
     mask = confidences > confidence_threshold
     boxes = boxes[mask]
     confidences = confidences[mask]
@@ -93,11 +91,10 @@ def postprocess_predictions(outputs, original_size, input_size=INPUT_SIZE, confi
     if boxes.shape[0] == 0:
         return detections
 
-    # Scale to original image size
+    # Scale coordinates back to original camera resolution
     scale_x = orig_w / input_size
     scale_y = orig_h / input_size
 
-    # Convert from center x,y,w,h to corners
     x_center = boxes[:, 0].astype(float) * scale_x
     y_center = boxes[:, 1].astype(float) * scale_y
     width = boxes[:, 2].astype(float) * scale_x
@@ -108,17 +105,15 @@ def postprocess_predictions(outputs, original_size, input_size=INPUT_SIZE, confi
     x2 = (x_center + width / 2).astype(int)
     y2 = (y_center + height / 2).astype(int)
 
-    # Prepare for OpenCV NMS: boxes as [x, y, w, h]
+    # Format bounding boxes for OpenCV Non-Maximum Suppression (NMS)
     nms_boxes = np.stack([x1, y1, (x2 - x1), (y2 - y1)], axis=1).tolist()
     nms_confidences = confidences.astype(float).tolist()
 
     try:
         indices = cv2.dnn.NMSBoxes(nms_boxes, nms_confidences, confidence_threshold, iou_threshold)
     except Exception:
-        # If NMS fails for unexpected types, fallback to keeping all
         indices = np.arange(len(nms_boxes))
 
-    # cv2.dnn.NMSBoxes returns vector of indices or empty list
     if hasattr(indices, 'flatten'):
         sel = indices.flatten()
     else:
@@ -140,13 +135,10 @@ def postprocess_predictions(outputs, original_size, input_size=INPUT_SIZE, confi
     return detections
 
 def process_corn_logic_stationary(detections):
-    """
-    Identifies the detected types, prints them to the terminal, 
-    and sets indicator lights without moving the robot motors.
-    """
+    """Identifies detected targets and updates terminal output and status LEDs."""
     if not detections:
         try:
-            robot.set_led(1, 0, 0, 0) # Turn off LED if nothing is seen
+            robot.set_led(1, 0, 0, 0)  # Off
         except Exception:
             pass
         return "Scanning... No targets in view."
@@ -154,11 +146,12 @@ def process_corn_logic_stationary(detections):
     found_types = set()
 
     for det in detections:
-        if det.get('class_name') == "yellow":
+        cname = det.get('class_name')
+        if cname == "yellow":
             found_types.add("RIPE CORN (yellow)")
-        elif det.get('class_name') == "green":
+        elif cname == "green":
             found_types.add("UNRIPE CORN (green)")
-        elif det.get('class_name') == "stand":
+        elif cname == "stand":
             found_types.add("STRUCTURAL STAND")
 
     if found_types:
@@ -166,32 +159,32 @@ def process_corn_logic_stationary(detections):
 
     try:
         if "RIPE CORN (yellow)" in found_types:
-            robot.set_led(1, 0, 255, 0)  # Solid GREEN light for ripe corn presence
+            robot.set_led(1, 0, 255, 0)   # Solid GREEN LED for ripe corn
         elif "UNRIPE CORN (green)" in found_types:
-            robot.set_led(1, 255, 0, 0)  # Solid RED light for unripe corn presence
+            robot.set_led(1, 255, 0, 0)   # Solid RED LED for unripe corn
         elif "STRUCTURAL STAND" in found_types:
-            robot.set_led(1, 0, 0, 255)  # Solid BLUE light if only a stand is visible
+            robot.set_led(1, 0, 0, 255)   # Solid BLUE LED for stand
     except Exception:
         pass
 
     return f"In View: {', '.join(found_types)}"
 
 def draw_detections(frame, detections):
-    """Draws custom colored bounding boxes based on class sorting labels"""
+    """Draws bounding boxes on frame (Uses OpenCV BGR color values)."""
     for det in detections:
         x1, y1, x2, y2 = det['bbox']
 
         if det['class_name'] == "yellow":
-            box_color = (0, 255, 255)  # Yellow BGR
+            box_color = (0, 255, 255)  # Yellow
             status_lbl = "RIPE CORN"
         elif det['class_name'] == "green":
-            box_color = (0, 255, 0)    # Green BGR
+            box_color = (0, 255, 0)    # Green
             status_lbl = "UNRIPE CORN"
         elif det['class_name'] == "stand":
-            box_color = (255, 255, 0)  # Cyan BGR
+            box_color = (255, 255, 0)  # Cyan
             status_lbl = "STRUCTURAL STAND"
         else:
-            box_color = (255, 0, 0)    # Blue for alternative classes
+            box_color = (255, 0, 0)    # Blue
             status_lbl = det['class_name'].upper()
 
         label = f"{status_lbl} [{det.get('confidence', 0):.2f}]"
@@ -219,7 +212,6 @@ def main():
             pass
         return
 
-    # Discover actual model IO names to prevent mismatches
     try:
         model_input_name = session.get_inputs()[0].name
         model_output_name = session.get_outputs()[0].name
@@ -230,7 +222,7 @@ def main():
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        print("Failed to open camera device (index 0). Check camera connection or try a different index.")
+        print("Failed to open camera device (index 0).")
         try:
             robot.disconnect()
         except Exception:
@@ -249,8 +241,6 @@ def main():
                 print("Frame read failed; stopping.")
                 break
 
-            h, w = frame.shape[:2]
-
             input_data, original_size = preprocess_image(frame, input_size=INPUT_SIZE)
 
             try:
@@ -266,7 +256,6 @@ def main():
             frame = draw_detections(frame, detections)
             cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-            # Show window if possible; skip in headless environments
             try:
                 cv2.imshow("Corn AI Classifier Matrix", frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
